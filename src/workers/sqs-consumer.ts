@@ -24,14 +24,6 @@ export class SQSConsumer {
     this.isRunning = true;
     this.logger.info('SQS Consumer started. Polling for messages...');
 
-    // Initialize Redshift table
-    try {
-      await this.redshiftService.createTableIfNotExists();
-      this.logger.info('Redshift table initialized');
-    } catch (error) {
-      this.logger.error('Error initializing Redshift table', error);
-    }
-
     // Start polling
     this.poll();
   }
