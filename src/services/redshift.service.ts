@@ -44,6 +44,28 @@ export class RedshiftService {
         return `'${String(value).replace(/'/g, "''")}'`;
       };
 
+      // Helper function to format SUPER (JSON) type values for Redshift
+      const formatSuperValue = (value: any): string => {
+        if (value === null || value === undefined || value === '') {
+          return 'NULL';
+        }
+        if (typeof value === 'object') {
+          return `JSON_PARSE('${JSON.stringify(value).replace(/'/g, "''")}')`;
+        }
+        if (typeof value === 'string') {
+          // If it's already a JSON string, parse it
+          try {
+            JSON.parse(value);
+            return `JSON_PARSE('${value.replace(/'/g, "''")}')`;
+          } catch {
+            // Not valid JSON, treat as a simple string value
+            return `JSON_PARSE('"${value.replace(/"/g, '\\"').replace(/'/g, "''")}"')`;
+          }
+        }
+        // For primitives, wrap in JSON_PARSE
+        return `JSON_PARSE('${JSON.stringify(value).replace(/'/g, "''")}')`;
+      };
+
       // Helper function to format timestamp
       const formatTimestamp = (value: any): string => {
         if (!value) return 'NULL';
@@ -130,7 +152,7 @@ export class RedshiftService {
           ${formatValue(parsedData.contributor_3_touch_type)}, ${formatTimestamp(parsedData.contributor_3_touch_time)}, 
           ${formatValue(parsedData.contributor_3_match_type)}, ${formatValue(parsedData.contributor_3_engagement_type)}, 
           ${formatValue(parsedData.contributor_3_af_prt)},
-          ${formatValue(parsedData.event_type)}, ${formatValue(parsedData.event_source)}, ${formatValue(parsedData.event_value)}, 
+          ${formatValue(parsedData.event_type)}, ${formatValue(parsedData.event_source)}, ${formatSuperValue(parsedData.event_value)}, 
           ${formatValue(parsedData.event_revenue)}, ${formatValue(parsedData.event_revenue_usd)},
           ${formatValue(parsedData.event_revenue_currency)}, ${formatValue(parsedData.revenue_in_selected_currency)}, 
           ${formatValue(parsedData.selected_currency)}, ${formatValue(parsedData.is_receipt_validated)}, 
@@ -186,6 +208,7 @@ export class RedshiftService {
   private async waitForStatementCompletion(statementId: string): Promise<void> {
     const client = this.redshiftClientFactory.getClient();
     const config = this.redshiftClientFactory.getConfig();
+    const startTime = Date.now();
 
     for (let i = 0; i < config.maxRetries; i++) {
       const command = new DescribeStatementCommand({ Id: statementId });
@@ -193,9 +216,22 @@ export class RedshiftService {
       
       const status = response.Status;
       
+      if (i > 0 && i % 5 === 0) {
+        // Log progress every 5 attempts (every 10 seconds)
+        this.logger.debug('Waiting for Redshift statement completion', {
+          statementId,
+          status,
+          attempt: i + 1,
+          maxRetries: config.maxRetries,
+        });
+      }
+      
       if (status === 'FINISHED') {
+        const duration = Date.now() - startTime;
         this.logger.debug('Redshift statement completed successfully', {
           statementId,
+          durationMs: duration,
+          attempts: i + 1,
         });
         return;
       } else if (status === 'FAILED' || status === 'ABORTED') {
@@ -207,8 +243,8 @@ export class RedshiftService {
         throw new Error(`Redshift statement failed: ${errorMessage}`);
       }
       
-      // Wait before next check
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      // Wait before next check (2 seconds)
+      await new Promise(resolve => setTimeout(resolve, 2000));
     }
     
     this.logger.error('Timeout waiting for Redshift statement to complete', undefined, {

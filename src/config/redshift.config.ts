@@ -34,8 +34,8 @@ export class RedshiftClientFactory {
       dbUser: process.env.REDSHIFT_DB_USER || '',
       tableName: process.env.REDSHIFT_TABLE_NAME || 'appsflyer_events',
       region: process.env.AWS_REGION || 'us-east-1',
-      statementTimeout: parseInt(process.env.REDSHIFT_STATEMENT_TIMEOUT || '10000', 10),
-      maxRetries: parseInt(process.env.REDSHIFT_MAX_RETRIES || '10', 10),
+      statementTimeout: parseInt(process.env.REDSHIFT_STATEMENT_TIMEOUT || '60000', 10), // 60 seconds
+      maxRetries: parseInt(process.env.REDSHIFT_MAX_RETRIES || '30', 10), // 30 retries * 2s = 60s total
     };
   }
 
