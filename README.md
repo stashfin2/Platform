@@ -5,7 +5,8 @@ A Node.js service built with TypeScript and Fastify that processes AppsFlyer web
 ## Architecture Overview
 
 ```
-AppsFlyer → POST /webhook/appsflyer → SQS Queue → SQS Consumer → Redshift
+AppsFlyer → POST /webhook/appsflyer → SQS Queue → SQS Consumer → Primary Redshift
+                                                                  ↘ Secondary Redshift (optional)
 ```
 
 ### Data Flow
@@ -14,6 +15,8 @@ AppsFlyer → POST /webhook/appsflyer → SQS Queue → SQS Consumer → Redshif
 2. **SQS Producer** - Service receives data and pushes it to an AWS SQS queue
 3. **SQS Consumer** - Background worker polls SQS for new messages
 4. **Redshift Storage** - Consumer processes messages and inserts data into Redshift
+   - Primary Redshift (required): Main data warehouse
+   - Secondary Redshift (optional): Dual-write to a second Redshift in different VPC via PrivateLink
 
 ## Features
 
@@ -26,6 +29,7 @@ AppsFlyer → POST /webhook/appsflyer → SQS Queue → SQS Consumer → Redshif
 - ☁️ **AWS Integration** - SQS and Redshift Data API
 - 🔁 **Background Worker** - Separate SQS consumer process
 - 🛡️ **Error Handling** - Robust error handling and retry logic
+- 🔁 **Dual-Write Support** - Optional parallel writes to secondary Redshift cluster via PrivateLink
 
 ## Prerequisites
 
@@ -121,11 +125,24 @@ AWS_SECRET_ACCESS_KEY=your_secret_access_key
 # AWS SQS Configuration
 SQS_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/123456789012/appsflyer-events
 
-# AWS Redshift Configuration
+# Primary AWS Redshift Configuration
 REDSHIFT_CLUSTER_IDENTIFIER=your-redshift-cluster
 REDSHIFT_DATABASE=your_database
 REDSHIFT_DB_USER=your_db_user
 REDSHIFT_TABLE_NAME=appsflyer_events
+REDSHIFT_STATEMENT_TIMEOUT=60000
+REDSHIFT_MAX_RETRIES=30
+
+# Secondary AWS Redshift Configuration (Optional - for dual-write across VPCs)
+SECONDARY_REDSHIFT_ENABLED=false
+# SECONDARY_REDSHIFT_ENDPOINT=https://akara-redshift-access-appflyer-endpoint-fxsovvcwarpoattqgxt0.churfikvu1nn.ap-south-1.redshift.amazonaws.com
+# SECONDARY_AWS_REGION=ap-south-1
+# SECONDARY_REDSHIFT_CLUSTER_IDENTIFIER=your-secondary-redshift-cluster
+# SECONDARY_REDSHIFT_DATABASE=your_secondary_database
+# SECONDARY_REDSHIFT_DB_USER=your_secondary_db_user
+# SECONDARY_REDSHIFT_TABLE_NAME=appsflyer_events
+# SECONDARY_REDSHIFT_STATEMENT_TIMEOUT=60000
+# SECONDARY_REDSHIFT_MAX_RETRIES=30
 ```
 
 ### 3. Run Development Server
@@ -210,6 +227,103 @@ Receives event data from AppsFlyer and pushes it to SQS.
 GET /api/hello
 ```
 Returns service information and available endpoints.
+
+## Dual-Write to Secondary Redshift (Cross-VPC via PrivateLink)
+
+The service supports optional dual-write functionality to replicate data to a secondary Redshift cluster in a different VPC using AWS PrivateLink.
+
+### Features
+
+- **Parallel Writes**: Data is inserted into both primary and secondary Redshift clusters simultaneously
+- **Independent Failure Handling**: If one Redshift insert fails, the other still completes successfully
+- **PrivateLink Support**: Connect to Redshift in different VPC using VPC endpoint
+- **Graceful Degradation**: Service continues working even if secondary Redshift is unavailable
+- **Comprehensive Logging**: Separate logs for primary and secondary insert operations
+
+### Configuration
+
+To enable dual-write to a secondary Redshift:
+
+1. **Set up AWS PrivateLink** (if cross-VPC):
+   - Create a VPC endpoint for Redshift Data API in your VPC
+   - Note the endpoint URL (e.g., `https://vpce-xxxxx.redshift-data.us-west-2.vpce.amazonaws.com`)
+
+2. **Enable Secondary Redshift** in your `.env`:
+   ```env
+   SECONDARY_REDSHIFT_ENABLED=true
+   SECONDARY_REDSHIFT_ENDPOINT=https://akara-redshift-access-appflyer-endpoint-fxsovvcwarpoattqgxt0.churfikvu1nn.ap-south-1.redshift.amazonaws.com
+   SECONDARY_AWS_REGION=ap-south-1
+   SECONDARY_REDSHIFT_CLUSTER_IDENTIFIER=your-secondary-cluster
+   SECONDARY_REDSHIFT_DATABASE=your_database
+   SECONDARY_REDSHIFT_DB_USER=your_user
+   SECONDARY_REDSHIFT_TABLE_NAME=appsflyer_events
+   ```
+
+3. **Ensure IAM Permissions** for both Redshift clusters:
+   ```json
+   {
+     "Effect": "Allow",
+     "Action": [
+       "redshift-data:ExecuteStatement",
+       "redshift-data:DescribeStatement"
+     ],
+     "Resource": "*"
+   }
+   ```
+
+### How It Works
+
+1. When a message is consumed from SQS, the service:
+   - Parses the AppsFlyer event data
+   - Creates two parallel insert operations (primary + secondary)
+   - Executes both inserts using `Promise.allSettled()`
+   
+2. Each insert operation:
+   - Connects to its respective Redshift cluster
+   - Builds and executes the INSERT statement
+   - Waits for statement completion
+   - Logs success or failure independently
+
+3. Success criteria:
+   - Primary insert must succeed (returns statement ID)
+   - Secondary insert failure is logged but doesn't fail the overall operation
+   - SQS message is only deleted if primary insert succeeds
+
+### Monitoring
+
+Monitor dual-write operations in logs:
+
+```json
+{
+  "msg": "Data successfully inserted into primary Redshift",
+  "statementId": "uuid-xxx",
+  "target": "primary"
+}
+{
+  "msg": "Data successfully inserted into secondary Redshift",
+  "statementId": "uuid-yyy",
+  "target": "secondary"
+}
+```
+
+If secondary insert fails:
+```json
+{
+  "level": "error",
+  "msg": "Failed to insert data into secondary Redshift",
+  "target": "secondary",
+  "error": "..."
+}
+```
+
+### Disabling Secondary Redshift
+
+To disable dual-write at any time:
+```env
+SECONDARY_REDSHIFT_ENABLED=false
+```
+
+The service will continue operating normally with only the primary Redshift.
 
 ## Project Structure
 

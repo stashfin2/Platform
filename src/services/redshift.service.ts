@@ -2,7 +2,7 @@ import 'reflect-metadata';
 import { Service, Inject } from 'typedi';
 import { ExecuteStatementCommand, DescribeStatementCommand } from '@aws-sdk/client-redshift-data';
 import { LoggerService } from './logger.service';
-import { RedshiftClientFactory } from '../config/redshift.config';
+import { RedshiftClientFactory, SecondaryRedshiftClientFactory } from '../config/redshift.config';
 
 interface AppsFlyerEvent {
   [key: string]: any;
@@ -12,19 +12,78 @@ interface AppsFlyerEvent {
 export class RedshiftService {
   constructor(
     @Inject() private readonly redshiftClientFactory: RedshiftClientFactory,
+    @Inject() private readonly secondaryRedshiftClientFactory: SecondaryRedshiftClientFactory,
     @Inject() private readonly logger: LoggerService
   ) {}
 
   /**
-   * Insert AppsFlyer event data into Redshift table
+   * Insert AppsFlyer event data into Redshift table(s)
+   * If secondary Redshift is enabled, inserts into both primary and secondary in parallel
    */
   async insertData(data: AppsFlyerEvent): Promise<string> {
-    const client = this.redshiftClientFactory.getClient();
-    const config = this.redshiftClientFactory.getConfig();
-
     try {
       // Parse the data if it's a string
       const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
+
+      // Insert into both primary and secondary Redshift instances in parallel
+      const insertPromises = [
+        this.insertToRedshift(parsedData, this.redshiftClientFactory, 'primary')
+      ];
+
+      // Add secondary Redshift insert if enabled
+      if (this.secondaryRedshiftClientFactory.isEnabled()) {
+        insertPromises.push(
+          this.insertToRedshift(parsedData, this.secondaryRedshiftClientFactory, 'secondary')
+        );
+      }
+
+      // Execute inserts in parallel and collect results
+      const results = await Promise.allSettled(insertPromises);
+
+      // Log results for each insert
+      results.forEach((result, index) => {
+        const target = index === 0 ? 'primary' : 'secondary';
+        if (result.status === 'fulfilled') {
+          this.logger.info(`Data successfully inserted into ${target} Redshift`, {
+            statementId: result.value,
+            appsflyerId: parsedData.appsflyer_id,
+            eventName: parsedData.event_name,
+          });
+        } else {
+          this.logger.error(`Failed to insert data into ${target} Redshift`, result.reason, {
+            appsflyerId: parsedData.appsflyer_id,
+            eventName: parsedData.event_name,
+          });
+        }
+      });
+
+      // Return the primary statement ID
+      const primaryResult = results[0];
+      if (primaryResult.status === 'fulfilled') {
+        return primaryResult.value;
+      } else {
+        throw primaryResult.reason;
+      }
+    } catch (error) {
+      this.logger.error('Error processing data for Redshift insertion', error, {
+        appsflyerId: data.appsflyer_id,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Insert data into a specific Redshift instance
+   */
+  private async insertToRedshift(
+    parsedData: AppsFlyerEvent,
+    clientFactory: RedshiftClientFactory | SecondaryRedshiftClientFactory,
+    target: 'primary' | 'secondary'
+  ): Promise<string> {
+    const client = clientFactory.getClient();
+    const config = clientFactory.getConfig();
+
+    try {
       
       // Helper function to safely escape and format values
       const formatValue = (value: any): string => {
@@ -182,21 +241,23 @@ export class RedshiftService {
       const response = await client.send(command);
       const statementId = response.Id || '';
       
-      this.logger.info('Data inserted into Redshift', {
+      this.logger.debug(`Data insert command sent to ${target} Redshift`, {
         statementId,
         tableName: config.tableName,
         appsflyerId: parsedData.appsflyer_id,
         eventName: parsedData.event_name,
+        target,
       });
       
       // Wait for statement to complete
-      await this.waitForStatementCompletion(statementId);
+      await this.waitForStatementCompletion(statementId, clientFactory, target);
       
       return statementId;
     } catch (error) {
-      this.logger.error('Error inserting data into Redshift', error, {
+      this.logger.error(`Error inserting data into ${target} Redshift`, error, {
         tableName: config.tableName,
-        appsflyerId: data.appsflyer_id,
+        appsflyerId: parsedData.appsflyer_id,
+        target,
       });
       throw error;
     }
@@ -205,9 +266,13 @@ export class RedshiftService {
   /**
    * Wait for Redshift statement to complete
    */
-  private async waitForStatementCompletion(statementId: string): Promise<void> {
-    const client = this.redshiftClientFactory.getClient();
-    const config = this.redshiftClientFactory.getConfig();
+  private async waitForStatementCompletion(
+    statementId: string,
+    clientFactory: RedshiftClientFactory | SecondaryRedshiftClientFactory,
+    target: 'primary' | 'secondary'
+  ): Promise<void> {
+    const client = clientFactory.getClient();
+    const config = clientFactory.getConfig();
     const startTime = Date.now();
 
     for (let i = 0; i < config.maxRetries; i++) {
@@ -218,39 +283,43 @@ export class RedshiftService {
       
       if (i > 0 && i % 5 === 0) {
         // Log progress every 5 attempts (every 10 seconds)
-        this.logger.debug('Waiting for Redshift statement completion', {
+        this.logger.debug(`Waiting for ${target} Redshift statement completion`, {
           statementId,
           status,
           attempt: i + 1,
           maxRetries: config.maxRetries,
+          target,
         });
       }
       
       if (status === 'FINISHED') {
         const duration = Date.now() - startTime;
-        this.logger.debug('Redshift statement completed successfully', {
+        this.logger.debug(`${target} Redshift statement completed successfully`, {
           statementId,
           durationMs: duration,
           attempts: i + 1,
+          target,
         });
         return;
       } else if (status === 'FAILED' || status === 'ABORTED') {
         const errorMessage = response.Error || 'Unknown error';
-        this.logger.error('Redshift statement failed', new Error(errorMessage), {
+        this.logger.error(`${target} Redshift statement failed`, new Error(errorMessage), {
           statementId,
           status,
+          target,
         });
-        throw new Error(`Redshift statement failed: ${errorMessage}`);
+        throw new Error(`${target} Redshift statement failed: ${errorMessage}`);
       }
       
       // Wait before next check (2 seconds)
       await new Promise(resolve => setTimeout(resolve, 2000));
     }
     
-    this.logger.error('Timeout waiting for Redshift statement to complete', undefined, {
+    this.logger.error(`Timeout waiting for ${target} Redshift statement to complete`, undefined, {
       statementId,
       maxRetries: config.maxRetries,
+      target,
     });
-    throw new Error('Timeout waiting for Redshift statement to complete');
+    throw new Error(`Timeout waiting for ${target} Redshift statement to complete`);
   }
 }
