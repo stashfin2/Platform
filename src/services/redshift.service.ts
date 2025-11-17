@@ -241,7 +241,7 @@ export class RedshiftService {
       const response = await client.send(command);
       const statementId = response.Id || '';
       
-      this.logger.debug(`Data insert command sent to ${target} Redshift`, {
+      this.logger.debug(`Data insert command sent to ${target} Redshift (async, not waiting)`, {
         statementId,
         tableName: config.tableName,
         appsflyerId: parsedData.appsflyer_id,
@@ -249,8 +249,9 @@ export class RedshiftService {
         target,
       });
       
-      // Wait for statement to complete
-      await this.waitForStatementCompletion(statementId, clientFactory, target);
+      // ⚡ FIRE-AND-FORGET: Do NOT wait for statement to complete
+      // This allows maximum throughput - Redshift will execute the statement asynchronously
+      // If you need to track failures, monitor Redshift query history in AWS Console
       
       return statementId;
     } catch (error) {
@@ -265,7 +266,15 @@ export class RedshiftService {
 
   /**
    * Wait for Redshift statement to complete
+   * 
+   * ⚠️ DEPRECATED - NO LONGER USED
+   * This method was used to wait for Redshift inserts to complete,
+   * but it created a bottleneck and prevented high CPU utilization.
+   * Now using fire-and-forget async inserts for maximum throughput.
+   * 
+   * Kept for reference in case synchronous waiting is needed in future.
    */
+  // @ts-ignore - Kept for reference, not currently used
   private async waitForStatementCompletion(
     statementId: string,
     clientFactory: RedshiftClientFactory | SecondaryRedshiftClientFactory,
