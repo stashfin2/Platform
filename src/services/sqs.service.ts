@@ -1,6 +1,12 @@
 import 'reflect-metadata';
 import { Service, Inject } from 'typedi';
-import { SendMessageCommand, ReceiveMessageCommand, DeleteMessageCommand } from '@aws-sdk/client-sqs';
+import { 
+  SendMessageCommand, 
+  ReceiveMessageCommand, 
+  DeleteMessageCommand,
+  DeleteMessageBatchCommand,
+  DeleteMessageBatchRequestEntry
+} from '@aws-sdk/client-sqs';
 import { v4 as uuidv4 } from 'uuid';
 import { LoggerService } from './logger.service';
 import { SQSClientFactory } from '../config/sqs.config';
@@ -100,5 +106,71 @@ export class SQSService {
       });
       throw error;
     }
+  }
+
+  /**
+   * Batch delete messages from SQS queue
+   * Much more efficient than individual deletes
+   * SQS supports up to 10 messages per batch
+   */
+  async batchDeleteMessages(receiptHandles: string[]): Promise<void> {
+    if (receiptHandles.length === 0) {
+      return;
+    }
+
+    const client = this.sqsClientFactory.getClient();
+    const queueUrl = this.sqsClientFactory.getQueueUrl();
+
+    // Process in chunks of 10 (SQS batch limit)
+    const chunks = this.chunkArray(receiptHandles, 10);
+
+    try {
+      await Promise.all(
+        chunks.map(async (chunk) => {
+          const entries: DeleteMessageBatchRequestEntry[] = chunk.map(
+            (receiptHandle, index) => ({
+              Id: `msg-${index}`,
+              ReceiptHandle: receiptHandle,
+            })
+          );
+
+          const command = new DeleteMessageBatchCommand({
+            QueueUrl: queueUrl,
+            Entries: entries,
+          });
+
+          const response = await client.send(command);
+
+          if (response.Failed && response.Failed.length > 0) {
+            this.logger.warn('Some messages failed to delete in batch', {
+              failed: response.Failed.length,
+              failedIds: response.Failed.map(f => f.Id),
+            });
+          }
+        })
+      );
+
+      this.logger.debug(`Batch deleted ${receiptHandles.length} messages from SQS`, {
+        queueUrl,
+        totalMessages: receiptHandles.length,
+      });
+    } catch (error) {
+      this.logger.error('Error batch deleting messages from SQS', error, {
+        queueUrl,
+        messageCount: receiptHandles.length,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Utility to chunk array into smaller arrays
+   */
+  private chunkArray<T>(array: T[], chunkSize: number): T[][] {
+    const chunks: T[][] = [];
+    for (let i = 0; i < array.length; i += chunkSize) {
+      chunks.push(array.slice(i, i + chunkSize));
+    }
+    return chunks;
   }
 }
