@@ -4,11 +4,6 @@ import { SQSService } from '../services/sqs.service';
 import { RedshiftService } from '../services/redshift.service';
 import { LoggerService } from '../services/logger.service';
 
-interface MessageResult {
-  message: any;
-  success: boolean;
-  receiptHandle: string;
-}
 
 @Service()
 export class SQSConsumer {
@@ -71,40 +66,55 @@ export class SQSConsumer {
         if (messages.length > 0) {
           this.logger.info(`📨 Received ${messages.length} messages [${this.workerId}]`);
 
-          // Process messages in parallel with proper error handling
-          const results = await Promise.allSettled(
-            messages.map(message => this.processMessage(message))
-          );
+          // 🚀 BATCH PROCESSING: Process all messages together in a single Redshift INSERT
+          try {
+            // Parse all message bodies
+            const parsedMessages = messages.map(message => {
+              try {
+                const body = JSON.parse(message.Body);
+                return {
+                  data: body.data,
+                  receiptHandle: message.ReceiptHandle,
+                  messageId: body.id,
+                };
+              } catch (error) {
+                this.logger.error('❌ Error parsing message', error, {
+                  messageId: message.MessageId,
+                  workerId: this.workerId,
+                });
+                return null;
+              }
+            }).filter(msg => msg !== null);
 
-          // Collect successful message receipt handles for batch deletion
-          const successfulReceipts: string[] = [];
-          const failedReceipts: string[] = [];
-
-          results.forEach((result, index) => {
-            if (result.status === 'fulfilled' && result.value.success) {
-              successfulReceipts.push(result.value.receiptHandle);
-              this.messagesProcessed++;
-            } else {
-              failedReceipts.push(messages[index].ReceiptHandle);
-              this.messagesFailed++;
+            if (parsedMessages.length > 0) {
+              // Extract data for batch insert
+              const dataArray = parsedMessages.map(msg => msg!.data);
+              
+              // Batch insert into Redshift (single query for all rows!)
+              await this.redshiftService.insertBatchData(dataArray);
+              
+              // All successful - batch delete all messages
+              const receiptHandles = parsedMessages.map(msg => msg!.receiptHandle);
+              await this.sqsService.batchDeleteMessages(receiptHandles);
+              
+              this.messagesProcessed += parsedMessages.length;
+              this.logger.info(`✅ Batch processed ${parsedMessages.length} messages [${this.workerId}]`);
             }
-          });
 
-          // Batch delete successful messages
-          if (successfulReceipts.length > 0) {
-            try {
-              await this.sqsService.batchDeleteMessages(successfulReceipts);
-              this.logger.info(`✅ Batch deleted ${successfulReceipts.length} messages [${this.workerId}]`);
-            } catch (error) {
-              this.logger.error('❌ Error batch deleting messages', error, {
-                workerId: this.workerId,
-                count: successfulReceipts.length,
-              });
+            // Track failed parsing
+            const failedCount = messages.length - parsedMessages.length;
+            if (failedCount > 0) {
+              this.messagesFailed += failedCount;
+              this.logger.warn(`⚠️  ${failedCount} messages failed parsing [${this.workerId}]`);
             }
-          }
-
-          if (failedReceipts.length > 0) {
-            this.logger.warn(`⚠️  ${failedReceipts.length} messages failed processing [${this.workerId}]`);
+          } catch (error) {
+            // Batch insert failed - messages will remain in queue and retry
+            this.messagesFailed += messages.length;
+            this.logger.error('❌ Batch processing failed', error, {
+              workerId: this.workerId,
+              messageCount: messages.length,
+            });
+            // Do NOT delete messages - they'll become visible again for retry
           }
         }
 
@@ -123,39 +133,6 @@ export class SQSConsumer {
     }
   }
 
-  /**
-   * Process a single SQS message
-   * Returns MessageResult for batch deletion tracking
-   */
-  private async processMessage(message: any): Promise<MessageResult> {
-    const receiptHandle = message.ReceiptHandle;
-    
-    try {
-      // Parse message body
-      const body = JSON.parse(message.Body);
-      
-      // Insert data into Redshift
-      await this.redshiftService.insertData(body.data);
-      
-      return {
-        message: body,
-        success: true,
-        receiptHandle,
-      };
-    } catch (error) {
-      this.logger.error('❌ Error processing message', error, {
-        messageId: message.MessageId,
-        workerId: this.workerId,
-      });
-      
-      // Return failure - message will NOT be deleted and will be retried
-      return {
-        message: null,
-        success: false,
-        receiptHandle,
-      };
-    }
-  }
 
   /**
    * Log throughput metrics periodically
