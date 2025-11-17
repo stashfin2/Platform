@@ -99,6 +99,12 @@ export class SQSConsumer {
               
               this.messagesProcessed += parsedMessages.length;
               this.logger.info(`✅ Batch processed ${parsedMessages.length} messages [${this.workerId}]`);
+              
+              // ⚠️ RATE LIMITING: Delay to prevent overwhelming Redshift
+              // ra3.large can process ~10-15 statements/sec, so we throttle sending rate
+              // This prevents the Redshift Data API queue from hitting 500 statement limit
+              const batchDelay = parseInt('2000', 10);
+              await this.sleep(batchDelay); // Default: 2 seconds between batches
             }
 
             // Track failed parsing
