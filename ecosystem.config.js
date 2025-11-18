@@ -1,14 +1,23 @@
 /**
  * PM2 Configuration for SQS Consumer Workers
  * 
+ * THROUGHPUT TARGET: 700,000 messages/day (8.1 msgs/sec sustained)
+ * 
+ * How this achieves 700k/day:
+ *   - 10 workers × 10 messages/batch × 1 batch/sec = 100 messages/sec theoretical
+ *   - With adaptive throttling: ~8-10 messages/sec sustained = 700k-850k/day
+ *   - Redshift fire-and-forget mode allows high throughput
+ *   - Adaptive throttling prevents hitting 500 statement limit
+ * 
  * Usage:
  *   pm2 start ecosystem.config.js --env production
  *   pm2 logs
  *   pm2 monit
  *   pm2 stop all
  * 
- * Scale workers:
- *   pm2 scale sqs-consumer 20
+ * Scale workers dynamically:
+ *   pm2 scale sqs-consumer 20   # Increase to 20 workers
+ *   pm2 scale sqs-consumer 5    # Decrease to 5 workers
  */
 
 module.exports = {
@@ -16,7 +25,7 @@ module.exports = {
     {
       name: 'sqs-consumer',
       script: './dist/index.js',
-      instances: 3, // Start with 3 workers for ra3.large cluster (prevents queue buildup)
+      instances: 10, // 10 workers = ~100 msgs/sec theoretical, ~8-10 msgs/sec with throttling
       exec_mode: 'cluster',
       
       // Auto-restart configuration
@@ -40,11 +49,16 @@ module.exports = {
         // SQS Configuration - OPTIMIZED
         ENABLE_SQS_CONSUMER: 'true',
         SQS_QUEUE_URL: 'https://sqs.ap-south-1.amazonaws.com/261962657740/appflyer-queue',
-        SQS_MAX_MESSAGES: '10',
-        SQS_WAIT_TIME_SECONDS: '20',
+        SQS_MAX_MESSAGES: '10', // AWS SQS maximum
+        SQS_WAIT_TIME_SECONDS: '20', // Long polling
         
-        // Rate Limiting - CRITICAL for small Redshift clusters
-        BATCH_DELAY_MS: '2000', // 2 seconds between batches (prevents 500 statement limit)
+        // Batch Size Configuration (NEW!)
+        TARGET_BATCH_SIZE: '100', // Accumulate 100 messages per INSERT (10x more efficient!)
+        MAX_BATCH_WAIT_MS: '5000', // Max 5 seconds wait to accumulate messages
+        
+        // Rate Limiting - Adaptive throttling based on Redshift load
+        // Set to 0 for maximum throughput, adaptive throttling kicks in when needed
+        BATCH_DELAY_MS: '0', // No base delay, relies on adaptive throttling (300+ statements = slow down)
         
         // AWS Credentials (use AWS_PROFILE or set these)
         AWS_REGION: 'ap-south-1',

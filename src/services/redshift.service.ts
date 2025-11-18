@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { Service, Inject } from 'typedi';
-import { ExecuteStatementCommand, DescribeStatementCommand } from '@aws-sdk/client-redshift-data';
+import { ExecuteStatementCommand, DescribeStatementCommand, ListStatementsCommand } from '@aws-sdk/client-redshift-data';
 import { LoggerService } from './logger.service';
 import { RedshiftClientFactory, SecondaryRedshiftClientFactory } from '../config/redshift.config';
 
@@ -10,6 +10,9 @@ interface AppsFlyerEvent {
 
 @Service()
 export class RedshiftService {
+  private lastStatementCountCheck: number = 0;
+  private cachedRunningStatements: number = 0;
+
   constructor(
     @Inject() private readonly redshiftClientFactory: RedshiftClientFactory,
     @Inject() private readonly secondaryRedshiftClientFactory: SecondaryRedshiftClientFactory,
@@ -585,5 +588,46 @@ export class RedshiftService {
       target,
     });
     throw new Error(`Timeout waiting for ${target} Redshift statement to complete`);
+  }
+
+  /**
+   * Get count of running Data API statements
+   * Caches result for 10 seconds to avoid excessive API calls
+   */
+  async getRunningStatementCount(): Promise<number> {
+    const now = Date.now();
+    const cacheDuration = 10000; // 10 seconds
+
+    // Return cached value if recent
+    if (now - this.lastStatementCountCheck < cacheDuration) {
+      return this.cachedRunningStatements;
+    }
+
+    try {
+      const client = this.redshiftClientFactory.getClient();
+      const command = new ListStatementsCommand({
+        Status: 'PICKED' // PICKED = Running in Redshift terminology
+      });
+
+      const response = await client.send(command);
+      const count = response.Statements?.length || 0;
+
+      // Update cache
+      this.lastStatementCountCheck = now;
+      this.cachedRunningStatements = count;
+
+      if (count > 100) {
+        this.logger.warn(`⚠️  High number of running Redshift statements detected`, {
+          runningStatements: count,
+          limit: 500,
+          percentOfLimit: ((count / 500) * 100).toFixed(1) + '%',
+        });
+      }
+
+      return count;
+    } catch (error) {
+      this.logger.error('Error checking running statement count', error);
+      return this.cachedRunningStatements; // Return cached value on error
+    }
   }
 }

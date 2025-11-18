@@ -20,6 +20,9 @@ RUN npm run build
 # Production stage
 FROM node:20-alpine
 
+# Install PM2 globally
+RUN npm install -g pm2
+
 # Set working directory
 WORKDIR /app
 
@@ -31,6 +34,12 @@ RUN npm ci --omit=dev && npm cache clean --force
 
 # Copy built application from builder stage
 COPY --from=builder /app/dist ./dist
+
+# Copy PM2 ecosystem config
+COPY ecosystem.config.js ./
+
+# Create logs directory
+RUN mkdir -p logs
 
 # Create non-root user
 RUN addgroup -g 1001 -S nodejs && \
@@ -45,8 +54,9 @@ EXPOSE 6000
 
 # Health check (adjust the endpoint if needed)
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:3000/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"
+  CMD node -e "require('http').get('http://localhost:6000/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"
 
-# Start the application
-CMD ["node", "dist/index.js"]
+# Start with PM2 (10 workers for 700k/day target)
+# Use --no-daemon to keep container running
+CMD ["pm2-runtime", "start", "ecosystem.config.js"]
 
