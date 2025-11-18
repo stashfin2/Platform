@@ -1,14 +1,6 @@
 /**
  * PM2 Configuration for SQS Consumer Workers
  * 
- * THROUGHPUT TARGET: 700,000 messages/day (8.1 msgs/sec sustained)
- * 
- * How this achieves 700k/day:
- *   - 10 workers × 10 messages/batch × 1 batch/sec = 100 messages/sec theoretical
- *   - With adaptive throttling: ~8-10 messages/sec sustained = 700k-850k/day
- *   - Redshift fire-and-forget mode allows high throughput
- *   - Adaptive throttling prevents hitting 500 statement limit
- * 
  * Usage:
  *   pm2 start ecosystem.config.js --env production
  *   pm2 logs
@@ -39,37 +31,37 @@ module.exports = {
       log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
       merge_logs: true,
       
-      // Environment variables
+      // Environment variables (PRODUCTION CONFIGURATION)
+      // All AWS credentials and Redshift config come from .env file
       env: {
-        NODE_ENV: 'development',
-        PORT: 3000,
+        NODE_ENV: 'production',
+        PORT: 6000,
         HOST: '0.0.0.0',
         LOG_LEVEL: 'info',
         
         // SQS Configuration - OPTIMIZED
         ENABLE_SQS_CONSUMER: 'true',
-        SQS_QUEUE_URL: 'https://sqs.ap-south-1.amazonaws.com/261962657740/appflyer-queue',
         SQS_MAX_MESSAGES: '10', // AWS SQS maximum
         SQS_WAIT_TIME_SECONDS: '20', // Long polling
         
-        // Batch Size Configuration (NEW!)
-        TARGET_BATCH_SIZE: '100', // Accumulate 100 messages per INSERT (10x more efficient!)
-        MAX_BATCH_WAIT_MS: '5000', // Max 5 seconds wait to accumulate messages
+        // Batch Size Configuration (CRITICAL!)
+        // NOTE: Redshift Data API has 100KB query size limit
+        // AppsFlyer schema is VERY large (100+ columns + JSON fields)
+        // Even 50 rows exceeds limit! Using 20 for safety
+        TARGET_BATCH_SIZE: '20', // Conservative batch size to stay well under 100KB limit
+        MAX_BATCH_WAIT_MS: '3000', // Max 3 seconds wait (shorter for smaller batches)
         
         // Rate Limiting - Adaptive throttling based on Redshift load
         // Set to 0 for maximum throughput, adaptive throttling kicks in when needed
         BATCH_DELAY_MS: '0', // No base delay, relies on adaptive throttling (300+ statements = slow down)
         
-        // AWS Credentials (use AWS_PROFILE or set these)
-        AWS_REGION: 'ap-south-1',
-        // AWS_ACCESS_KEY_ID: 'your_key',
-        // AWS_SECRET_ACCESS_KEY: 'your_secret',
+        // Disable secondary Redshift (only use primary)
+        ENABLE_SECONDARY_REDSHIFT: 'false',
         
-        // Redshift Configuration
-        // REDSHIFT_CLUSTER_IDENTIFIER: 'your-cluster',
-        // REDSHIFT_DATABASE: 'your_db',
-        // REDSHIFT_DB_USER: 'your_user',
-        // REDSHIFT_TABLE_NAME: 'appsflyer_events',
+        // NOTE: All credentials and endpoints come from .env file:
+        // - AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+        // - SQS_QUEUE_URL
+        // - REDSHIFT_CLUSTER_IDENTIFIER, REDSHIFT_DATABASE, REDSHIFT_DB_USER, REDSHIFT_TABLE_NAME
       },
       
       env_production: {
