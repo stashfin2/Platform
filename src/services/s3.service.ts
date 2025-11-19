@@ -3,9 +3,7 @@ import { Service, Inject } from 'typedi';
 import { 
   PutObjectCommand, 
   ListObjectsV2Command, 
-  DeleteObjectCommand,
   DeleteObjectsCommand,
-  S3Client 
 } from '@aws-sdk/client-s3';
 import { S3ClientFactory } from '../config/s3.config';
 import { LoggerService } from './logger.service';
@@ -182,7 +180,6 @@ export class S3Service {
 
     try {
       const config = this.s3ClientFactory.getConfig();
-      const archivePrefix = process.env.S3_ARCHIVE_PREFIX || 'appsflyer-events-archive';
 
       // For simplicity, we'll just delete for now
       // In production, you might want to copy to archive then delete

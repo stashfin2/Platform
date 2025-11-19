@@ -174,7 +174,6 @@ export class S3RedshiftSync {
    */
   private async waitForStatementCompletion(statementId: string): Promise<void> {
     const client = this.redshiftClientFactory.getClient();
-    const config = this.redshiftClientFactory.getConfig();
     const startTime = Date.now();
     const maxRetries = 180; // 6 minutes (180 * 2 seconds)
 
