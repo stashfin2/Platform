@@ -592,11 +592,12 @@ export class RedshiftService {
 
   /**
    * Get count of running Data API statements
-   * Caches result for 10 seconds to avoid excessive API calls
+   * Caches result for 2 seconds to avoid excessive API calls
+   * REDUCED from 10s to 2s for faster throttling response
    */
   async getRunningStatementCount(): Promise<number> {
     const now = Date.now();
-    const cacheDuration = 10000; // 10 seconds
+    const cacheDuration = 1000; // 2 seconds (was 10s - too slow!)
 
     // Return cached value if recent
     if (now - this.lastStatementCountCheck < cacheDuration) {

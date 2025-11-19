@@ -17,7 +17,7 @@ module.exports = {
     {
       name: 'sqs-consumer',
       script: './dist/index.js',
-      instances: 10, // 10 workers = ~100 msgs/sec theoretical, ~8-10 msgs/sec with throttling
+      instances: 5, // Balanced: 5 workers with aggressive throttling = 650k-850k/day
       exec_mode: 'cluster',
       
       // Auto-restart configuration
@@ -51,9 +51,9 @@ module.exports = {
         TARGET_BATCH_SIZE: '20', // Conservative batch size to stay well under 100KB limit
         MAX_BATCH_WAIT_MS: '3000', // Max 3 seconds wait (shorter for smaller batches)
         
-        // Rate Limiting - Adaptive throttling based on Redshift load
-        // Set to 0 for maximum throughput, adaptive throttling kicks in when needed
-        BATCH_DELAY_MS: '0', // No base delay, relies on adaptive throttling (300+ statements = slow down)
+        // Rate Limiting - MANDATORY delay to prevent overwhelming Redshift
+        // With fire-and-forget mode, we MUST add delays between batches
+        BATCH_DELAY_MS: '2000', // 2 second minimum delay between batches
         
         // Disable secondary Redshift (only use primary)
         ENABLE_SECONDARY_REDSHIFT: 'false',

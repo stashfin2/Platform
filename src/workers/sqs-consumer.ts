@@ -110,21 +110,39 @@ export class SQSConsumer {
           });
 
           try {
-            // 🛡️ ADAPTIVE THROTTLING: Check if Redshift is overloaded
+            // 🛡️ AGGRESSIVE THROTTLING: Prevent hitting 500 statement limit
             const runningStatements = await this.redshiftService.getRunningStatementCount();
-            if (runningStatements > 400) {
-              // Approaching limit (500), slow down dramatically
-              this.logger.warn(`⚠️  Redshift near capacity, throttling... [${this.workerId}]`, {
+            
+            if (runningStatements > 450) {
+              // CRITICAL: Very close to limit - STOP processing
+              this.logger.error(`🚨 CRITICAL: Redshift at ${runningStatements}/500 statements! [${this.workerId}]`, {
                 runningStatements,
                 limit: 500,
               });
-              await this.sleep(10000); // Wait 10 seconds
-            } else if (runningStatements > 300) {
+              await this.sleep(30000); // Wait 30 seconds for Redshift to clear
+              // Re-check after wait
+              const recheck = await this.redshiftService.getRunningStatementCount();
+              if (recheck > 400) {
+                this.logger.warn(`Still high at ${recheck}, waiting another 30s [${this.workerId}]`);
+                await this.sleep(30000);
+              }
+            } else if (runningStatements > 350) {
+              // Approaching limit (500), slow down dramatically
+              this.logger.warn(`⚠️  Redshift near capacity (${runningStatements}/500), throttling... [${this.workerId}]`, {
+                runningStatements,
+                limit: 500,
+              });
+              await this.sleep(20000); // Wait 20 seconds
+            } else if (runningStatements > 250) {
               // High load, moderate throttling
-              this.logger.info(`⚠️  Redshift high load, brief pause [${this.workerId}]`, {
+              this.logger.info(`⚠️  Redshift high load (${runningStatements}/500), brief pause [${this.workerId}]`, {
                 runningStatements,
               });
-              await this.sleep(5000); // Wait 5 seconds
+              await this.sleep(10000); // Wait 10 seconds
+            } else if (runningStatements > 150) {
+              // Medium load, light throttling
+              this.logger.debug(`Redshift moderate load (${runningStatements}/500), small delay [${this.workerId}]`);
+              await this.sleep(3000); // Wait 3 seconds
             }
 
             // Extract data for batch insert
@@ -144,18 +162,21 @@ export class SQSConsumer {
             accumulatedMessages = [];
             lastBatchTime = Date.now();
             
-            // ⚠️ DYNAMIC RATE LIMITING: Only delay if NOT overloaded
-            // When Redshift is healthy, process as fast as possible
-            // Adaptive throttling above already handles overload scenarios
-            if (runningStatements < 200) {
-              // Redshift is healthy - minimal or no delay for maximum throughput
-              const batchDelay = parseInt(process.env.BATCH_DELAY_MS || '0', 10);
-              if (batchDelay > 0) {
-                await this.sleep(batchDelay);
-              }
+            // ⚠️ MANDATORY RATE LIMITING: Always add delay to prevent overwhelming Redshift
+            // Fire-and-forget mode means statements queue up fast, so we MUST slow down
+            if (runningStatements > 300) {
+              // High load - longer delay
+              await this.sleep(15000); // 15 seconds
+            } else if (runningStatements > 200) {
+              // Moderate load - medium delay
+              await this.sleep(10000); // 10 seconds
+            } else if (runningStatements > 100) {
+              // Light load - short delay
+              await this.sleep(5000); // 5 seconds
             } else {
-              // Moderate load - small delay
-              await this.sleep(1000); // 1 second
+              // Low load - minimum delay to prevent queue buildup
+              const batchDelay = parseInt(process.env.BATCH_DELAY_MS || '2000', 10);
+              await this.sleep(batchDelay); // Default 2 seconds
             }
           } catch (error) {
             // Batch insert failed - messages will remain in queue and retry
