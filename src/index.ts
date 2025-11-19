@@ -3,7 +3,8 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import dotenv from 'dotenv';
 import { Container } from 'typedi';
-import { SQSConsumer } from './workers/sqs-consumer';
+import { S3RedshiftSync } from './workers/s3-redshift-sync';
+import { S3Service } from './services/s3.service';
 import { registerRoutes } from './routes';
 
 // Load environment variables
@@ -11,7 +12,7 @@ dotenv.config();
 
 const PORT = parseInt(process.env.PORT || '6000', 10);
 const HOST = process.env.HOST || '0.0.0.0';
-const ENABLE_CONSUMER = process.env.ENABLE_SQS_CONSUMER === 'true';
+const ENABLE_S3_SYNC = process.env.ENABLE_S3_SYNC === 'true';
 
 // Create Fastify instance
 const fastify = Fastify({
@@ -20,7 +21,8 @@ const fastify = Fastify({
   },
 });
 
-let sqsConsumer: SQSConsumer | null = null;
+let s3RedshiftSync: S3RedshiftSync | null = null;
+let s3Service: S3Service | null = null;
 
 // Register CORS
 fastify.register(cors, {
@@ -34,8 +36,14 @@ fastify.register(registerRoutes);
 const gracefulShutdown = async () => {
   fastify.log.info('Shutting down gracefully...');
   
-  if (sqsConsumer) {
-    sqsConsumer.stop();
+  // Force flush any pending S3 batches
+  if (s3Service) {
+    await s3Service.forceFlush();
+  }
+  
+  // Stop S3 sync worker
+  if (s3RedshiftSync) {
+    s3RedshiftSync.stop();
   }
   
   await fastify.close();
@@ -51,13 +59,16 @@ const start = async () => {
     await fastify.listen({ port: PORT, host: HOST });
     fastify.log.info(`Server listening on ${HOST}:${PORT}`);
 
-    // Start SQS consumer if enabled
-    if (ENABLE_CONSUMER) {
-      sqsConsumer = Container.get(SQSConsumer);
-      await sqsConsumer.start();
-      fastify.log.info('SQS Consumer started');
+    // Get S3Service instance for graceful shutdown
+    s3Service = Container.get(S3Service);
+
+    // Start S3 to Redshift sync worker if enabled
+    if (ENABLE_S3_SYNC) {
+      s3RedshiftSync = Container.get(S3RedshiftSync);
+      await s3RedshiftSync.start();
+      fastify.log.info('S3 to Redshift sync worker started');
     } else {
-      fastify.log.info('SQS Consumer is disabled. Set ENABLE_SQS_CONSUMER=true to enable.');
+      fastify.log.info('S3 sync is disabled. Set ENABLE_S3_SYNC=true to enable.');
     }
   } catch (err) {
     fastify.log.error(err);

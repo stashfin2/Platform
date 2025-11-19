@@ -15,9 +15,9 @@
 module.exports = {
   apps: [
     {
-      name: 'sqs-consumer',
+      name: 'api-server',
       script: './dist/index.js',
-      instances: 5, // Balanced: 5 workers with aggressive throttling = 650k-850k/day
+      instances: 1, // Single API server instance
       exec_mode: 'cluster',
       
       // Auto-restart configuration
@@ -39,29 +39,18 @@ module.exports = {
         HOST: '0.0.0.0',
         LOG_LEVEL: 'info',
         
-        // SQS Configuration - OPTIMIZED
-        ENABLE_SQS_CONSUMER: 'true',
-        SQS_MAX_MESSAGES: '10', // AWS SQS maximum
-        SQS_WAIT_TIME_SECONDS: '20', // Long polling
+        // S3 Configuration (Optimized for 800k msgs/day)
+        S3_BUCKET: 'appsflyer-sqs',
+        S3_PREFIX: 'appsflyer-events',
+        S3_BATCH_SIZE: '500', // 500 events per file (optimized for high volume)
+        S3_BATCH_FLUSH_INTERVAL: '30000', // 30 seconds
         
-        // Batch Size Configuration (CRITICAL!)
-        // NOTE: Redshift Data API has 100KB query size limit
-        // AppsFlyer schema is VERY large (100+ columns + JSON fields)
-        // Even 50 rows exceeds limit! Using 20 for safety
-        TARGET_BATCH_SIZE: '20', // Conservative batch size to stay well under 100KB limit
-        MAX_BATCH_WAIT_MS: '3000', // Max 3 seconds wait (shorter for smaller batches)
-        
-        // Rate Limiting - MANDATORY delay to prevent overwhelming Redshift
-        // With fire-and-forget mode, we MUST add delays between batches
-        BATCH_DELAY_MS: '2000', // 2 second minimum delay between batches
+        // S3 Sync Configuration
+        ENABLE_S3_SYNC: 'true',
+        S3_SYNC_INTERVAL_MS: '3600000', // 1 hour (3600000ms)
         
         // Disable secondary Redshift (only use primary)
         ENABLE_SECONDARY_REDSHIFT: 'false',
-        
-        // NOTE: All credentials and endpoints come from .env file:
-        // - AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
-        // - SQS_QUEUE_URL
-        // - REDSHIFT_CLUSTER_IDENTIFIER, REDSHIFT_DATABASE, REDSHIFT_DB_USER, REDSHIFT_TABLE_NAME
       },
       
       env_production: {

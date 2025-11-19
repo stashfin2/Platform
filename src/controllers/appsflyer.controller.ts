@@ -1,7 +1,7 @@
 import 'reflect-metadata';
 import { Service, Inject } from 'typedi';
 import { FastifyRequest, FastifyReply } from 'fastify';
-import { SQSService } from '../services/sqs.service';
+import { S3Service } from '../services/s3.service';
 import { LoggerService } from '../services/logger.service';
 
 export interface AppsFlyerWebhookBody {
@@ -30,7 +30,7 @@ export interface AppsFlyerWebhookBody {
 @Service()
 export class AppsFlyerController {
   constructor(
-    @Inject() private readonly sqsService: SQSService,
+    @Inject() private readonly s3Service: S3Service,
     @Inject() private readonly logger: LoggerService
   ) {}
 
@@ -76,18 +76,18 @@ export class AppsFlyerController {
         return;
       }
 
-      // Push complete payload to SQS
-      const messageId = await this.sqsService.pushToQueue(appsflyerData);
+      // Upload complete payload to S3 (batched)
+      const fileKey = await this.s3Service.uploadEvent(appsflyerData);
       
-      this.logger.info('Data pushed to SQS successfully', {
-        messageId,
+      this.logger.info('Data queued for S3 upload', {
+        fileKey,
         appsflyerId: appsflyerData.appsflyer_id,
         eventName: appsflyerData.event_name,
       });
 
       reply.code(200).send({
         success: true,
-        messageId,
+        fileKey,
         timestamp: new Date().toISOString(),
       });
     } catch (error) {
