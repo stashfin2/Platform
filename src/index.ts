@@ -4,6 +4,7 @@ import cors from '@fastify/cors';
 import dotenv from 'dotenv';
 import { Container } from 'typedi';
 import { S3RedshiftSync } from './workers/s3-redshift-sync';
+import { CleverTapSync } from './workers/clevertap-sync';
 import { S3Service } from './services/s3.service';
 import { registerRoutes } from './routes';
 
@@ -13,6 +14,7 @@ dotenv.config();
 const PORT = parseInt(process.env.PORT || '6000', 10);
 const HOST = process.env.HOST || '0.0.0.0';
 const ENABLE_S3_SYNC = process.env.ENABLE_S3_SYNC === 'true';
+const ENABLE_CLEVERTAP_SYNC = process.env.ENABLE_CLEVERTAP_SYNC === 'true';
 
 // Create Fastify instance
 const fastify = Fastify({
@@ -22,6 +24,7 @@ const fastify = Fastify({
 });
 
 let s3RedshiftSync: S3RedshiftSync | null = null;
+let clevertapSync: CleverTapSync | null = null;
 let s3Service: S3Service | null = null;
 
 // Register CORS
@@ -44,6 +47,11 @@ const gracefulShutdown = async () => {
   // Stop S3 sync worker
   if (s3RedshiftSync) {
     s3RedshiftSync.stop();
+  }
+  
+  // Stop CleverTap sync worker
+  if (clevertapSync) {
+    clevertapSync.stop();
   }
   
   await fastify.close();
@@ -69,6 +77,15 @@ const start = async () => {
       fastify.log.info('S3 to Redshift sync worker started');
     } else {
       fastify.log.info('S3 sync is disabled. Set ENABLE_S3_SYNC=true to enable.');
+    }
+
+    // Start CleverTap to Redshift sync worker if enabled
+    if (ENABLE_CLEVERTAP_SYNC) {
+      clevertapSync = Container.get(CleverTapSync);
+      await clevertapSync.start();
+      fastify.log.info('CleverTap to Redshift sync worker started');
+    } else {
+      fastify.log.info('CleverTap sync is disabled. Set ENABLE_CLEVERTAP_SYNC=true to enable.');
     }
   } catch (err) {
     fastify.log.error(err);
