@@ -57,16 +57,28 @@ export class CleverTapS3Service {
       // Filter files by date (only from October 2024 onwards)
       const files = allFiles.filter(filename => {
         try {
-          // Extract timestamp from filename (format: timestamp-...-....csv.gz)
+          // Extract timestamp from filename
+          // Format: timestamp1-timestamp2-timestamp3-...csv.gz
+          // The SECOND timestamp is usually the data/event date
           const parts = filename.split('/').pop()?.split('-') || [];
-          if (parts.length > 0) {
-            const fileTimestamp = parseInt(parts[0], 10);
+          
+          if (parts.length >= 2) {
+            // Try the second timestamp first (data date for most files)
+            const fileTimestamp = parseInt(parts[1], 10);
             
-            // Check if file is from October onwards
             if (!isNaN(fileTimestamp) && fileTimestamp >= this.startTimestamp) {
               return true;
             }
           }
+          
+          // Fallback to first timestamp if second doesn't exist or is invalid
+          if (parts.length > 0) {
+            const fallbackTimestamp = parseInt(parts[0], 10);
+            if (!isNaN(fallbackTimestamp) && fallbackTimestamp >= this.startTimestamp) {
+              return true;
+            }
+          }
+          
           return false;
         } catch (error) {
           this.logger.warn('⚠️  Could not parse timestamp from filename, including file', {
