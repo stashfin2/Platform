@@ -83,12 +83,12 @@ export class CleverTapSync {
     });
     this.logger.info('═══════════════════════════════════════════════════════════════');
 
-    let jsonPath = '';
     let totalRowsProcessed = 0;
+    let totalFilesProcessed = 0;
 
     try {
-      // 1. List all pending CSV files in S3 (from October onwards)
-      this.logger.info('📂 Step 1/6: Listing pending CSV files from S3...');
+      // 1. List all pending CSV files in S3
+      this.logger.info('📂 Step 1: Listing pending CSV files from S3...');
       const pendingFiles = await this.clevertapS3Service.listPendingFiles();
 
       if (pendingFiles.length === 0) {
@@ -103,54 +103,101 @@ export class CleverTapSync {
         lastFile: pendingFiles[pendingFiles.length - 1],
       });
 
-      // 2. Convert CSV files to JSON format (for schema evolution support)
-      this.logger.info('📝 Step 2/6: Converting CSV files to JSON format...');
-      const conversionStartTime = Date.now();
-      jsonPath = await this.csvToJsonConverter.convertCsvFilesToJson(pendingFiles);
-      const conversionDuration = Date.now() - conversionStartTime;
+      // Process files in batches to avoid memory issues
+      const batchSize = parseInt(process.env.CLEVERTAP_BATCH_SIZE || '20', 10);
+      const totalBatches = Math.ceil(pendingFiles.length / batchSize);
       
-      this.logger.info('✅ CSV to JSON conversion completed', {
-        durationSeconds: Math.floor(conversionDuration / 1000),
-        filesConverted: pendingFiles.length,
+      this.logger.info('📦 Processing files in batches', {
+        totalFiles: pendingFiles.length,
+        batchSize,
+        totalBatches,
       });
 
-      // 3. Use Redshift COPY command to load JSON data from S3 (with schema evolution)
-      this.logger.info('📥 Step 3/6: Executing Redshift COPY command...');
-      const copyStartTime = Date.now();
-      const statementId = await this.copyFromS3ToRedshift();
-      this.logger.info('✅ COPY command submitted', { statementId });
+      // Process each batch
+      for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+        const batchStart = batchIndex * batchSize;
+        const batchEnd = Math.min(batchStart + batchSize, pendingFiles.length);
+        const batchFiles = pendingFiles.slice(batchStart, batchEnd);
+        
+        this.logger.info('═══════════════════════════════════════════════════════════════');
+        this.logger.info(`📦 Processing Batch ${batchIndex + 1}/${totalBatches}`, {
+          filesInBatch: batchFiles.length,
+          range: `${batchStart + 1}-${batchEnd} of ${pendingFiles.length}`,
+        });
 
-      // 4. Wait for COPY command to complete
-      this.logger.info('⏳ Step 4/6: Waiting for COPY to complete...');
-      const rowsLoaded = await this.waitForStatementCompletion(statementId);
-      const copyDuration = Date.now() - copyStartTime;
-      totalRowsProcessed = rowsLoaded;
-      
-      this.logger.info('✅ Data loaded to Redshift successfully', {
-        rowsLoaded: totalRowsProcessed,
-        durationSeconds: Math.floor(copyDuration / 1000),
-        table: this.tableName,
-      });
+        try {
+          // 2. Convert CSV files to JSON format
+          this.logger.info('📝 Step 2: Converting CSV files to JSON format...');
+          const conversionStartTime = Date.now();
+          await this.csvToJsonConverter.convertCsvFilesToJson(batchFiles);
+          const conversionDuration = Date.now() - conversionStartTime;
+          
+          this.logger.info('✅ CSV to JSON conversion completed', {
+            durationSeconds: Math.floor(conversionDuration / 1000),
+            filesConverted: batchFiles.length,
+          });
 
-      // 5. Clean up converted JSON files
-      this.logger.info('🗑️  Step 5/6: Cleaning up temporary JSON files...');
-      await this.csvToJsonConverter.cleanupJsonFiles();
-      this.logger.info('✅ JSON files cleaned up');
+          // 3. Use Redshift COPY command to load JSON data
+          this.logger.info('📥 Step 3: Executing Redshift COPY command...');
+          const copyStartTime = Date.now();
+          const statementId = await this.copyFromS3ToRedshift();
+          this.logger.info('✅ COPY command submitted', { statementId });
 
-      // 6. Archive/delete original CSV files
-      this.logger.info('📦 Step 6/6: Archiving processed CSV files...');
-      await this.clevertapS3Service.archiveFiles(pendingFiles);
-      this.logger.info('✅ CSV files archived');
+          // 4. Wait for COPY command to complete
+          this.logger.info('⏳ Step 4: Waiting for COPY to complete...');
+          const rowsLoaded = await this.waitForStatementCompletion(statementId);
+          const copyDuration = Date.now() - copyStartTime;
+          totalRowsProcessed += rowsLoaded;
+          
+          this.logger.info('✅ Data loaded to Redshift successfully', {
+            rowsLoaded,
+            durationSeconds: Math.floor(copyDuration / 1000),
+            table: this.tableName,
+          });
+
+          // 5. Clean up converted JSON files
+          this.logger.info('🗑️  Step 5: Cleaning up temporary JSON files...');
+          await this.csvToJsonConverter.cleanupJsonFiles();
+          this.logger.info('✅ JSON files cleaned up');
+
+          // 6. Archive/delete original CSV files for this batch
+          this.logger.info('📦 Step 6: Archiving processed CSV files...');
+          await this.clevertapS3Service.archiveFiles(batchFiles);
+          this.logger.info('✅ CSV files archived');
+
+          totalFilesProcessed += batchFiles.length;
+
+          this.logger.info(`✅ Batch ${batchIndex + 1}/${totalBatches} completed successfully`, {
+            filesProcessed: batchFiles.length,
+            totalProcessedSoFar: totalFilesProcessed,
+            totalRowsSoFar: totalRowsProcessed,
+          });
+
+        } catch (batchError) {
+          this.logger.error(`❌ Batch ${batchIndex + 1}/${totalBatches} failed`, batchError);
+          
+          // Clean up JSON files after batch error
+          try {
+            await this.csvToJsonConverter.cleanupJsonFiles();
+          } catch (cleanupError) {
+            this.logger.error('Error cleaning up JSON files after batch failure', cleanupError);
+          }
+          
+          // Don't delete CSV files on error - continue to next batch
+          this.logger.warn('⏭️  Skipping failed batch, continuing to next batch...');
+        }
+      }
 
       const syncDuration = Date.now() - syncStartTime;
       
       this.logger.info('═══════════════════════════════════════════════════════════════');
       this.logger.info('✅ SYNC COMPLETED SUCCESSFULLY', {
         timestamp: new Date().toISOString(),
-        filesProcessed: pendingFiles.length,
-        rowsLoaded: totalRowsProcessed,
+        totalFilesProcessed,
+        totalRowsLoaded: totalRowsProcessed,
         totalDurationSeconds: Math.floor(syncDuration / 1000),
         totalDurationMinutes: Math.floor(syncDuration / 60000),
+        batchesProcessed: totalBatches,
         table: this.tableName,
         nextSyncIn: Math.floor(this.syncIntervalMs / 60000) + ' minutes',
       });
@@ -161,22 +208,10 @@ export class CleverTapSync {
         timestamp: new Date().toISOString(),
         errorMessage: error instanceof Error ? error.message : String(error),
         table: this.tableName,
+        filesProcessedBeforeError: totalFilesProcessed,
       });
       this.logger.error('❌ CleverTap S3 to Redshift sync failed', error);
       this.logger.error('═══════════════════════════════════════════════════════════════');
-      
-      // Clean up JSON files if conversion succeeded but COPY failed
-      if (jsonPath) {
-        try {
-          this.logger.info('🗑️  Cleaning up JSON files after error...');
-          await this.csvToJsonConverter.cleanupJsonFiles();
-        } catch (cleanupError) {
-          this.logger.error('Error cleaning up JSON files after failure', cleanupError);
-        }
-      }
-      
-      // Don't delete CSV files on error - they'll be retried in next sync
-      this.logger.info('⏭️  CSV files preserved for retry in next sync cycle');
     }
   }
 
