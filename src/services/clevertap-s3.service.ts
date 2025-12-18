@@ -9,13 +9,28 @@ import { LoggerService } from './logger.service';
 
 @Service()
 export class CleverTapS3Service {
+  private readonly startDate: Date;
+  private readonly startTimestamp: number;
+
   constructor(
     @Inject() private readonly s3ClientFactory: CleverTapS3ClientFactory,
     @Inject() private readonly logger: LoggerService
-  ) {}
+  ) {
+    // Filter files from October 2024 onwards (default: October 1, 2024)
+    const startDateStr = process.env.CLEVERTAP_START_DATE || '2024-10-01';
+    this.startDate = new Date(startDateStr);
+    this.startTimestamp = Math.floor(this.startDate.getTime() / 1000);
+    
+    this.logger.info('📅 CleverTap date filter configured', {
+      startDate: startDateStr,
+      startTimestamp: this.startTimestamp,
+      filterDescription: `Only syncing files from ${startDateStr} onwards`,
+    });
+  }
 
   /**
    * List all pending CSV files in CleverTap S3 bucket
+   * Filters files to only include those from October 2024 onwards based on filename timestamp
    */
   async listPendingFiles(): Promise<string[]> {
     try {
@@ -31,13 +46,44 @@ export class CleverTapS3Service {
       const response = await client.send(command);
       
       // Filter for CSV and compressed CSV files
-      const files = response.Contents?.map(item => item.Key!)
+      let allFiles = response.Contents?.map(item => item.Key!)
         .filter(key => key.endsWith('.csv') || key.endsWith('.csv.gz')) || [];
 
-      this.logger.info(`📋 Found ${files.length} CleverTap CSV files in S3`, {
+      this.logger.info(`📋 Found ${allFiles.length} total CleverTap CSV files in S3`, {
         bucket: config.bucket,
         prefix: config.prefix,
-        fileCount: files.length,
+      });
+
+      // Filter files by date (only from October 2024 onwards)
+      const files = allFiles.filter(filename => {
+        try {
+          // Extract timestamp from filename (format: timestamp-...-....csv.gz)
+          const parts = filename.split('/').pop()?.split('-') || [];
+          if (parts.length > 0) {
+            const fileTimestamp = parseInt(parts[0], 10);
+            
+            // Check if file is from October onwards
+            if (!isNaN(fileTimestamp) && fileTimestamp >= this.startTimestamp) {
+              return true;
+            }
+          }
+          return false;
+        } catch (error) {
+          this.logger.warn('⚠️  Could not parse timestamp from filename, including file', {
+            filename,
+          });
+          return true; // Include file if we can't parse the date
+        }
+      });
+
+      const filteredCount = allFiles.length - files.length;
+      
+      this.logger.info(`📋 Filtered CleverTap files by date`, {
+        totalFiles: allFiles.length,
+        filesAfterFilter: files.length,
+        filteredOut: filteredCount,
+        startDate: this.startDate.toISOString().split('T')[0],
+        sampleFile: files[0] || 'none',
       });
 
       return files;

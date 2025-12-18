@@ -26,10 +26,10 @@ export class CleverTapSync {
     @Inject() private readonly clevertapS3ClientFactory: CleverTapS3ClientFactory,
     @Inject() private readonly logger: LoggerService
   ) {
-    // Sync interval in milliseconds (default: 1 hour)
-    this.syncIntervalMs = parseInt(process.env.CLEVERTAP_SYNC_INTERVAL_MS || '3600000', 10);
-    // CleverTap table name
-    this.tableName = process.env.CLEVERTAP_TABLE_NAME || 'appsflyer.clevertap_events';
+    // Sync interval in milliseconds (default: 30 minutes)
+    this.syncIntervalMs = parseInt(process.env.CLEVERTAP_SYNC_INTERVAL_MS || '1800000', 10);
+    // CleverTap table name - using new campaign events table
+    this.tableName = process.env.CLEVERTAP_TABLE_NAME || 'appsflyer.clever_tap_campaign_events';
   }
 
   /**
@@ -73,47 +73,102 @@ export class CleverTapSync {
     }
 
     const syncStartTime = Date.now();
-    this.logger.info('🔄 Starting CleverTap S3 to Redshift sync...');
+    const syncTimestamp = new Date().toISOString();
+    
+    this.logger.info('═══════════════════════════════════════════════════════════════');
+    this.logger.info('🔄 Starting CleverTap S3 to Redshift sync', {
+      timestamp: syncTimestamp,
+      table: this.tableName,
+      bucket: this.clevertapS3ClientFactory.getConfig().bucket,
+    });
+    this.logger.info('═══════════════════════════════════════════════════════════════');
 
     let jsonPath = '';
+    let totalRowsProcessed = 0;
 
     try {
-      // 1. List all pending CSV files in S3
+      // 1. List all pending CSV files in S3 (from October onwards)
+      this.logger.info('📂 Step 1/6: Listing pending CSV files from S3...');
       const pendingFiles = await this.clevertapS3Service.listPendingFiles();
 
       if (pendingFiles.length === 0) {
-        this.logger.info('✅ No CleverTap files to sync');
+        this.logger.info('✅ No CleverTap files to sync (all caught up!)');
+        this.logger.info('Next sync in ' + Math.floor(this.syncIntervalMs / 60000) + ' minutes');
         return;
       }
 
+      this.logger.info('📋 Found files to process:', {
+        totalFiles: pendingFiles.length,
+        firstFile: pendingFiles[0],
+        lastFile: pendingFiles[pendingFiles.length - 1],
+      });
+
       // 2. Convert CSV files to JSON format (for schema evolution support)
-      this.logger.info('📝 Converting CSV files to JSON format...');
+      this.logger.info('📝 Step 2/6: Converting CSV files to JSON format...');
+      const conversionStartTime = Date.now();
       jsonPath = await this.csvToJsonConverter.convertCsvFilesToJson(pendingFiles);
+      const conversionDuration = Date.now() - conversionStartTime;
+      
+      this.logger.info('✅ CSV to JSON conversion completed', {
+        durationSeconds: Math.floor(conversionDuration / 1000),
+        filesConverted: pendingFiles.length,
+      });
 
       // 3. Use Redshift COPY command to load JSON data from S3 (with schema evolution)
+      this.logger.info('📥 Step 3/6: Executing Redshift COPY command...');
+      const copyStartTime = Date.now();
       const statementId = await this.copyFromS3ToRedshift();
+      this.logger.info('✅ COPY command submitted', { statementId });
 
       // 4. Wait for COPY command to complete
-      await this.waitForStatementCompletion(statementId);
+      this.logger.info('⏳ Step 4/6: Waiting for COPY to complete...');
+      const rowsLoaded = await this.waitForStatementCompletion(statementId);
+      const copyDuration = Date.now() - copyStartTime;
+      totalRowsProcessed = rowsLoaded;
+      
+      this.logger.info('✅ Data loaded to Redshift successfully', {
+        rowsLoaded: totalRowsProcessed,
+        durationSeconds: Math.floor(copyDuration / 1000),
+        table: this.tableName,
+      });
 
       // 5. Clean up converted JSON files
+      this.logger.info('🗑️  Step 5/6: Cleaning up temporary JSON files...');
       await this.csvToJsonConverter.cleanupJsonFiles();
+      this.logger.info('✅ JSON files cleaned up');
 
       // 6. Archive/delete original CSV files
+      this.logger.info('📦 Step 6/6: Archiving processed CSV files...');
       await this.clevertapS3Service.archiveFiles(pendingFiles);
+      this.logger.info('✅ CSV files archived');
 
       const syncDuration = Date.now() - syncStartTime;
-      this.logger.info('✅ CleverTap S3 to Redshift sync completed successfully', {
-        fileCount: pendingFiles.length,
-        durationMs: syncDuration,
-        durationSeconds: Math.floor(syncDuration / 1000),
+      
+      this.logger.info('═══════════════════════════════════════════════════════════════');
+      this.logger.info('✅ SYNC COMPLETED SUCCESSFULLY', {
+        timestamp: new Date().toISOString(),
+        filesProcessed: pendingFiles.length,
+        rowsLoaded: totalRowsProcessed,
+        totalDurationSeconds: Math.floor(syncDuration / 1000),
+        totalDurationMinutes: Math.floor(syncDuration / 60000),
+        table: this.tableName,
+        nextSyncIn: Math.floor(this.syncIntervalMs / 60000) + ' minutes',
       });
+      this.logger.info('═══════════════════════════════════════════════════════════════');
     } catch (error) {
+      this.logger.error('═══════════════════════════════════════════════════════════════');
+      this.logger.error('❌ SYNC FAILED', {
+        timestamp: new Date().toISOString(),
+        errorMessage: error instanceof Error ? error.message : String(error),
+        table: this.tableName,
+      });
       this.logger.error('❌ CleverTap S3 to Redshift sync failed', error);
+      this.logger.error('═══════════════════════════════════════════════════════════════');
       
       // Clean up JSON files if conversion succeeded but COPY failed
       if (jsonPath) {
         try {
+          this.logger.info('🗑️  Cleaning up JSON files after error...');
           await this.csvToJsonConverter.cleanupJsonFiles();
         } catch (cleanupError) {
           this.logger.error('Error cleaning up JSON files after failure', cleanupError);
@@ -121,6 +176,7 @@ export class CleverTapSync {
       }
       
       // Don't delete CSV files on error - they'll be retried in next sync
+      this.logger.info('⏭️  CSV files preserved for retry in next sync cycle');
     }
   }
 
@@ -205,8 +261,9 @@ export class CleverTapSync {
 
   /**
    * Wait for Redshift statement to complete
+   * Returns the number of rows loaded
    */
-  private async waitForStatementCompletion(statementId: string): Promise<void> {
+  private async waitForStatementCompletion(statementId: string): Promise<number> {
     const client = this.redshiftClientFactory.getClient();
     const startTime = Date.now();
     const maxRetries = 180; // 6 minutes (180 * 2 seconds)
@@ -239,7 +296,7 @@ export class CleverTapSync {
             attempts: i + 1,
             rowsAffected,
           });
-          return;
+          return rowsAffected;
         } else if (status === 'FAILED' || status === 'ABORTED') {
           const errorMessage = response.Error || 'Unknown error';
           this.logger.error('❌ CleverTap COPY statement failed', new Error(errorMessage), {
