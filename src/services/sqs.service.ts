@@ -2,10 +2,12 @@ import 'reflect-metadata';
 import { Service, Inject } from 'typedi';
 import { 
   SendMessageCommand, 
+  SendMessageBatchCommand,
   ReceiveMessageCommand, 
   DeleteMessageCommand,
   DeleteMessageBatchCommand,
-  DeleteMessageBatchRequestEntry
+  DeleteMessageBatchRequestEntry,
+  SendMessageBatchRequestEntry
 } from '@aws-sdk/client-sqs';
 import { v4 as uuidv4 } from 'uuid';
 import { LoggerService } from './logger.service';
@@ -158,6 +160,82 @@ export class SQSService {
       this.logger.error('Error batch deleting messages from SQS', error, {
         queueUrl,
         messageCount: receiptHandles.length,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Batch push multiple messages to SQS queue
+   * More efficient than individual sends (up to 10 messages per batch)
+   * Each message can contain multiple JSON rows (batched to stay under 256KB)
+   */
+  async batchPushToQueue(messages: Array<{ data: any; messageAttributes?: Record<string, any> }>): Promise<string[]> {
+    const client = this.sqsClientFactory.getClient();
+    const queueUrl = this.sqsClientFactory.getQueueUrl();
+
+    if (messages.length === 0) {
+      return [];
+    }
+
+    // SQS batch limit is 10 messages per batch
+    const chunks = this.chunkArray(messages, 10);
+    const messageIds: string[] = [];
+
+    try {
+      await Promise.all(
+        chunks.map(async (chunk) => {
+          const entries: SendMessageBatchRequestEntry[] = chunk.map((msg, index) => {
+            const messageId = uuidv4();
+            const messageBody = JSON.stringify({
+              id: messageId,
+              timestamp: new Date().toISOString(),
+              data: msg.data,
+            });
+
+            return {
+              Id: `msg-${index}`,
+              MessageBody: messageBody,
+              MessageAttributes: {
+                Source: {
+                  DataType: 'String',
+                  StringValue: msg.messageAttributes?.Source || 'CleverTap',
+                },
+                ...msg.messageAttributes,
+              },
+            };
+          });
+
+          const command = new SendMessageBatchCommand({
+            QueueUrl: queueUrl,
+            Entries: entries,
+          });
+
+          const response = await client.send(command);
+          
+          if (response.Successful) {
+            messageIds.push(...(response.Successful.map(s => s.MessageId || '')));
+          }
+
+          if (response.Failed && response.Failed.length > 0) {
+            this.logger.warn('Some messages failed to send in batch', {
+              failed: response.Failed.length,
+              failedIds: response.Failed.map(f => f.Id),
+            });
+          }
+        })
+      );
+
+      this.logger.info(`Batch sent ${messageIds.length} messages to SQS`, {
+        queueUrl,
+        totalMessages: messages.length,
+      });
+
+      return messageIds;
+    } catch (error) {
+      this.logger.error('Error batch pushing to SQS', error, {
+        queueUrl,
+        messageCount: messages.length,
       });
       throw error;
     }

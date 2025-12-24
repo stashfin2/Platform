@@ -5,6 +5,9 @@ import dotenv from 'dotenv';
 import { Container } from 'typedi';
 import { S3RedshiftSync } from './workers/s3-redshift-sync';
 import { CleverTapSync } from './workers/clevertap-sync';
+import { CleverTapSqsConsumer } from './workers/clevertap-sqs-consumer';
+import { CleverTapHybridSync } from './workers/clevertap-hybrid-sync';
+import { CleverTapS3PathConsumer } from './workers/clevertap-s3-path-consumer';
 import { S3Service } from './services/s3.service';
 import { registerRoutes } from './routes';
 
@@ -15,6 +18,8 @@ const PORT = parseInt(process.env.PORT || '6000', 10);
 const HOST = process.env.HOST || '0.0.0.0';
 const ENABLE_S3_SYNC = process.env.ENABLE_S3_SYNC === 'true';
 const ENABLE_CLEVERTAP_SYNC = process.env.ENABLE_CLEVERTAP_SYNC === 'true';
+const ENABLE_CLEVERTAP_SQS_CONSUMER = process.env.ENABLE_CLEVERTAP_SQS_CONSUMER !== 'false'; // Default: true
+const ENABLE_CLEVERTAP_HYBRID = process.env.ENABLE_CLEVERTAP_HYBRID === 'true';
 
 // Create Fastify instance
 const fastify = Fastify({
@@ -25,6 +30,9 @@ const fastify = Fastify({
 
 let s3RedshiftSync: S3RedshiftSync | null = null;
 let clevertapSync: CleverTapSync | null = null;
+let clevertapSqsConsumer: CleverTapSqsConsumer | null = null;
+let clevertapHybridSync: CleverTapHybridSync | null = null;
+let clevertapS3PathConsumer: CleverTapS3PathConsumer | null = null;
 let s3Service: S3Service | null = null;
 
 // Register CORS
@@ -54,6 +62,21 @@ const gracefulShutdown = async () => {
     clevertapSync.stop();
   }
   
+  // Stop CleverTap SQS consumer
+  if (clevertapSqsConsumer) {
+    clevertapSqsConsumer.stop();
+  }
+  
+  // Stop CleverTap hybrid sync
+  if (clevertapHybridSync) {
+    clevertapHybridSync.stop();
+  }
+  
+  // Stop CleverTap S3 path consumer
+  if (clevertapS3PathConsumer) {
+    clevertapS3PathConsumer.stop();
+  }
+  
   await fastify.close();
   process.exit(0);
 };
@@ -79,13 +102,31 @@ const start = async () => {
       fastify.log.info('S3 sync is disabled. Set ENABLE_S3_SYNC=true to enable.');
     }
 
-    // Start CleverTap to Redshift sync worker if enabled
-    if (ENABLE_CLEVERTAP_SYNC) {
+    // Start CleverTap Hybrid sync if enabled (recommended)
+    if (ENABLE_CLEVERTAP_HYBRID) {
+      clevertapHybridSync = Container.get(CleverTapHybridSync);
+      await clevertapHybridSync.start();
+      fastify.log.info('CleverTap Hybrid Sync started (CSV → Structured S3 → SQS paths)');
+      
+      clevertapS3PathConsumer = Container.get(CleverTapS3PathConsumer);
+      await clevertapS3PathConsumer.start();
+      fastify.log.info('CleverTap S3 Path Consumer started');
+    } else if (ENABLE_CLEVERTAP_SYNC) {
+      // Fallback to old approach (full data in SQS)
       clevertapSync = Container.get(CleverTapSync);
       await clevertapSync.start();
-      fastify.log.info('CleverTap to Redshift sync worker started');
+      fastify.log.info('CleverTap S3 to SQS sync worker started (legacy mode)');
     } else {
-      fastify.log.info('CleverTap sync is disabled. Set ENABLE_CLEVERTAP_SYNC=true to enable.');
+      fastify.log.info('CleverTap sync is disabled. Set ENABLE_CLEVERTAP_HYBRID=true to enable.');
+    }
+
+    // Start CleverTap SQS consumer if enabled (legacy mode only, not used in hybrid)
+    if (ENABLE_CLEVERTAP_SQS_CONSUMER && !ENABLE_CLEVERTAP_HYBRID) {
+      clevertapSqsConsumer = Container.get(CleverTapSqsConsumer);
+      await clevertapSqsConsumer.start();
+      fastify.log.info('CleverTap SQS consumer started (legacy mode)');
+    } else if (!ENABLE_CLEVERTAP_HYBRID) {
+      fastify.log.info('CleverTap SQS consumer is disabled.');
     }
   } catch (err) {
     fastify.log.error(err);
