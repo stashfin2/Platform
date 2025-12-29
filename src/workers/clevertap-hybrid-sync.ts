@@ -85,72 +85,94 @@ export class CleverTapHybridSync {
       
       this.logger.info(`📋 Processing ${filesToProcess.length} files${testLimit > 0 ? ' (TEST MODE)' : ''}`);
 
-      // 2. Process each CSV: convert to events and group
-      this.logger.info('📝 Step 2: Converting CSVs to structured JSONs...');
+      // 2. Process each CSV file ONE AT A TIME (memory-efficient)
+      this.logger.info('📝 Step 2: Processing CSVs one at a time (memory-efficient)...');
       
-      const allEvents: CleverTapEvent[] = [];
+      const allS3Paths: string[] = [];
+      const processedFiles: string[] = [];
+      let totalEventsProcessed = 0;
+      let totalJsonFilesCreated = 0;
       
       for (const csvFile of filesToProcess) {
-        const events = await this.readCsvFile(csvFile);
-        allEvents.push(...events);
-        this.logger.info(`   Processed ${csvFile}: ${events.length} rows`);
+        try {
+          this.logger.info(`   Processing file: ${csvFile}`);
+          
+          // Read CSV file into events (only this file in memory)
+          const events = await this.readCsvFile(csvFile);
+          this.logger.info(`   ├─ Read ${events.length} events from CSV`);
+          
+          if (events.length === 0) {
+            this.logger.info(`   └─ Skipping (no events)`);
+            processedFiles.push(csvFile);
+            continue;
+          }
+          
+          // Write structured JSON to S3 (only this file's data)
+          const s3Paths = await this.structuredJsonService.writeStructuredJson(events);
+          this.logger.info(`   ├─ Created ${s3Paths.length} JSON files`);
+          
+          if (s3Paths.length > 0) {
+            // Push S3 paths to SQS immediately
+            const messages = s3Paths.map(path => ({
+              data: {
+                s3_path: path,
+                source_file: csvFile,
+                row_count: events.length,
+              },
+              messageAttributes: {
+                Source: { DataType: 'String', StringValue: 'CleverTap' },
+              },
+            }));
+            
+            await this.sqsService.batchPushToQueue(messages);
+            this.logger.info(`   ├─ Pushed ${messages.length} messages to SQS`);
+            
+            allS3Paths.push(...s3Paths);
+            totalJsonFilesCreated += s3Paths.length;
+          }
+          
+          totalEventsProcessed += events.length;
+          processedFiles.push(csvFile);
+          
+          this.logger.info(`   └─ ✅ File completed (${events.length} events)`);
+          
+          // Clear memory after each file (help GC)
+          if (global.gc) {
+            global.gc();
+          }
+          
+        } catch (error) {
+          this.logger.error(`   └─ ❌ Error processing ${csvFile}`, error);
+          // Continue with next file instead of failing entire sync
+        }
       }
 
-      this.logger.info(`✅ Total events extracted: ${allEvents.length}`);
-
-      // 3. Write structured JSONs to S3
-      this.logger.info('📤 Step 3: Writing structured JSONs to S3...');
-      const s3Paths = await this.structuredJsonService.writeStructuredJson(allEvents);
-      
-      if (s3Paths.length === 0) {
-        this.logger.warn('⚠️  No event files created (all files were profile files with null data)');
-        this.logger.info('📦 Step 5: Archiving processed CSVs (profile files)...');
-        await this.clevertapS3Service.archiveFiles(filesToProcess);
-        this.logger.info('✅ Profile CSVs archived (no data to load)');
-        
-        const duration = Date.now() - syncStartTime;
-        this.logger.info('═══════════════════════════════════════════════════════════════');
-        this.logger.info('✅ SYNC COMPLETED (No event data found)', {
-          filesProcessed: filesToProcess.length,
-          eventsExtracted: allEvents.length,
-          profileEventsSkipped: allEvents.length,
-          jsonFilesCreated: 0,
-          durationSeconds: Math.floor(duration / 1000),
-        });
-        this.logger.info('═══════════════════════════════════════════════════════════════');
+      if (processedFiles.length === 0) {
+        this.logger.warn('⚠️  No files were processed successfully');
         return;
       }
-      
-      this.logger.info(`✅ Created ${s3Paths.length} JSON files in structured format`);
 
-      // 4. Push S3 paths to SQS
-      this.logger.info('📨 Step 4: Pushing S3 paths to SQS...');
-      const messages = s3Paths.map(path => ({
-        data: {
-          s3_path: path,
-          row_count: allEvents.filter(e => path.includes(e.event_name)).length,
-        },
-        messageAttributes: {
-          Source: { DataType: 'String', StringValue: 'CleverTap' },
-        },
-      }));
+      this.logger.info(`✅ All files processed: ${processedFiles.length}/${filesToProcess.length}`);
+      this.logger.info(`   Total events: ${totalEventsProcessed}`);
+      this.logger.info(`   Total JSON files: ${totalJsonFilesCreated}`);
+      this.logger.info(`   Total SQS messages: ${allS3Paths.length}`);
 
-      await this.sqsService.batchPushToQueue(messages);
-      this.logger.info(`✅ Pushed ${messages.length} path messages to SQS`);
-
-      // 5. Archive processed CSVs
-      this.logger.info('📦 Step 5: Archiving processed CSVs...');
-      await this.clevertapS3Service.archiveFiles(filesToProcess);
+      // 3. Archive processed CSVs (only the ones that succeeded)
+      this.logger.info('📦 Step 3: Archiving successfully processed CSVs...');
+      await this.clevertapS3Service.archiveFiles(processedFiles);
       this.logger.info('✅ CSVs archived');
 
       const duration = Date.now() - syncStartTime;
       
       this.logger.info('═══════════════════════════════════════════════════════════════');
       this.logger.info('✅ HYBRID SYNC COMPLETED', {
-        filesProcessed: filesToProcess.length,
-        eventsExtracted: allEvents.length,
-        jsonFilesCreated: s3Paths.length,
+        filesProcessed: processedFiles.length,
+        filesTotal: filesToProcess.length,
+        eventsExtracted: totalEventsProcessed,
+        jsonFilesCreated: totalJsonFilesCreated,
+        sqsMessagesCreated: allS3Paths.length,
         durationSeconds: Math.floor(duration / 1000),
+        memoryEfficient: true,
       });
       this.logger.info('═══════════════════════════════════════════════════════════════');
     } catch (error) {
