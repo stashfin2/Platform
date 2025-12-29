@@ -18,7 +18,7 @@ export class CleverTapS3ClientFactory {
   constructor() {
     this.config = {
       region: process.env.AWS_REGION || 'ap-south-1',
-      bucket: process.env.CLEVERTAP_S3_BUCKET || 'clever-tap-campaign-data',
+      bucket: process.env.CLEVERTAP_S3_BUCKET || 'clevertap-essential-data',
       accessKeyId: process.env.AWS_ACCESS_KEY_ID || '',
       secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || '',
       prefix: process.env.CLEVERTAP_S3_PREFIX || '', // Root folder by default
