@@ -17,13 +17,13 @@ module.exports = {
     {
       name: 'api-server',
       script: './dist/index.js',
-      instances: 1, // Single API server instance
+      instances: 2, // Two instances for better throughput (API + S3 Path Consumer)
       exec_mode: 'cluster',
       
       // Auto-restart configuration
       autorestart: true,
       watch: false,
-      max_memory_restart: '4G',
+      max_memory_restart: '4G', // Each instance can use up to 4GB (2 instances = 8GB total, well within 24GB)
       
       // Logging
       error_file: './logs/error.log',

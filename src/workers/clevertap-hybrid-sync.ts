@@ -5,8 +5,9 @@ import { CleverTapCsvToSqsService } from '../services/clevertap-csv-to-sqs.servi
 import { CleverTapStructuredJsonService } from '../services/clevertap-structured-json.service';
 import { CleverTapSQSService } from '../services/clevertap-sqs.service';
 import { LoggerService } from '../services/logger.service';
-import { GetObjectCommand } from '@aws-sdk/client-s3';
+import { GetObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
 import { CleverTapS3ClientFactory } from '../config/clevertap.config';
+import { CleverTapJsonS3ClientFactory } from '../config/clevertap-json-s3.config';
 import * as zlib from 'zlib';
 import * as readline from 'readline';
 import { Readable } from 'stream';
@@ -26,6 +27,7 @@ export class CleverTapHybridSync {
   constructor(
     @Inject() private readonly clevertapS3Service: CleverTapS3Service,
     @Inject() private readonly s3ClientFactory: CleverTapS3ClientFactory,
+    @Inject() private readonly jsonS3ClientFactory: CleverTapJsonS3ClientFactory,
     @Inject() private readonly csvToSqsService: CleverTapCsvToSqsService,
     @Inject() private readonly structuredJsonService: CleverTapStructuredJsonService,
     @Inject() private readonly sqsService: CleverTapSQSService,
@@ -108,12 +110,31 @@ export class CleverTapHybridSync {
           }
           
           // Write structured JSON to S3 (only this file's data)
-          const s3Paths = await this.structuredJsonService.writeStructuredJson(events);
-          this.logger.info(`   ├─ Created ${s3Paths.length} JSON files`);
+          let s3Paths: string[] = [];
+          try {
+            s3Paths = await this.structuredJsonService.writeStructuredJson(events);
+            this.logger.info(`   ├─ Created ${s3Paths.length} JSON files in S3`);
+          } catch (error) {
+            this.logger.error(`   ├─ ❌ Failed to write JSON to S3`, error);
+            throw error; // Fail this file so it doesn't get archived
+          }
           
           if (s3Paths.length > 0) {
-            // Push S3 paths to SQS immediately
-            const messages = s3Paths.map(path => ({
+            // Verify files exist in S3 before pushing to SQS
+            this.logger.info(`   ├─ Verifying S3 uploads...`);
+            const verifiedPaths = await this.verifyS3Files(s3Paths);
+            
+            if (verifiedPaths.length === 0) {
+              this.logger.error(`   ├─ ❌ None of the uploaded files could be verified in S3!`);
+              throw new Error('S3 upload verification failed');
+            }
+            
+            if (verifiedPaths.length < s3Paths.length) {
+              this.logger.warn(`   ├─ ⚠️  Only ${verifiedPaths.length}/${s3Paths.length} files verified in S3`);
+            }
+            
+            // Push ONLY verified S3 paths to SQS
+            const messages = verifiedPaths.map(path => ({
               data: {
                 s3_path: path,
                 source_file: csvFile,
@@ -125,10 +146,10 @@ export class CleverTapHybridSync {
             }));
             
             await this.sqsService.batchPushToQueue(messages);
-            this.logger.info(`   ├─ Pushed ${messages.length} messages to SQS`);
+            this.logger.info(`   ├─ Pushed ${messages.length} verified messages to SQS`);
             
-            allS3Paths.push(...s3Paths);
-            totalJsonFilesCreated += s3Paths.length;
+            allS3Paths.push(...verifiedPaths);
+            totalJsonFilesCreated += verifiedPaths.length;
           }
           
           totalEventsProcessed += events.length;
@@ -178,6 +199,44 @@ export class CleverTapHybridSync {
     } catch (error) {
       this.logger.error('❌ Hybrid sync failed', error);
     }
+  }
+
+  /**
+   * Verify that S3 files actually exist before pushing to SQS
+   * Prevents COPY errors due to missing files
+   */
+  private async verifyS3Files(s3Paths: string[]): Promise<string[]> {
+    const client = this.jsonS3ClientFactory.getClient();
+    const verifiedPaths: string[] = [];
+
+    for (const s3Path of s3Paths) {
+      try {
+        // Parse S3 path: s3://bucket/key
+        const match = s3Path.match(/s3:\/\/([^\/]+)\/(.+)/);
+        if (!match) {
+          this.logger.warn(`⚠️  Invalid S3 path format: ${s3Path}`);
+          continue;
+        }
+
+        const bucket = match[1];
+        const key = match[2];
+
+        // Check if file exists using HeadObject
+        await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+        
+        verifiedPaths.push(s3Path);
+        this.logger.debug(`✅ Verified S3 file exists: ${key}`);
+      } catch (error: any) {
+        if (error.name === 'NotFound' || error.$metadata?.httpStatusCode === 404) {
+          this.logger.error(`❌ S3 file NOT FOUND: ${s3Path}`);
+        } else {
+          this.logger.error(`❌ Error verifying S3 file: ${s3Path}`, error);
+        }
+        // Don't add to verified paths
+      }
+    }
+
+    return verifiedPaths;
   }
 
   /**
