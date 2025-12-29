@@ -98,30 +98,48 @@ export class CleverTapSQSService {
   }
 
   /**
-   * Receive messages from CleverTap SQS queue
+   * Receive messages from CleverTap SQS queue with retry logic
    */
   async receiveMessages(maxMessages?: number): Promise<any[]> {
     const client = this.sqsClientFactory.getClient();
     const config = this.sqsClientFactory.getConfig();
     const queueUrl = this.sqsClientFactory.getQueueUrl();
 
-    try {
-      const command = new ReceiveMessageCommand({
-        QueueUrl: queueUrl,
-        MaxNumberOfMessages: maxMessages || config.maxMessages,
-        WaitTimeSeconds: config.waitTimeSeconds,
-        MessageAttributeNames: ['All'],
-      });
+    // Retry up to 3 times for timeout errors
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const command = new ReceiveMessageCommand({
+          QueueUrl: queueUrl,
+          MaxNumberOfMessages: maxMessages || config.maxMessages,
+          WaitTimeSeconds: config.waitTimeSeconds,
+          MessageAttributeNames: ['All'],
+        });
 
-      const response = await client.send(command);
-      return response.Messages || [];
-    } catch (error) {
-      this.logger.error('Error receiving from CleverTap SQS', error, {
-        queueUrl,
-        maxMessages,
-      });
-      throw error;
+        const response = await client.send(command);
+        return response.Messages || [];
+      } catch (error: any) {
+        // Retry on timeout errors
+        if (error.name === 'TimeoutError' && attempt < 3) {
+          this.logger.warn(`SQS receive timeout, retrying (${attempt}/3)`, {
+            queueUrl,
+            error: error.message,
+          });
+          await new Promise(resolve => setTimeout(resolve, 1000 * attempt)); // Backoff
+          continue;
+        }
+
+        this.logger.error('Error receiving from CleverTap SQS', error, {
+          queueUrl,
+          maxMessages,
+          attempt,
+        });
+        
+        // Return empty array instead of throwing, let consumer retry
+        return [];
+      }
     }
+
+    return [];
   }
 
   /**

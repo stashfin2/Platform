@@ -20,8 +20,17 @@ export class CleverTapSQSClientFactory {
   private config: CleverTapSQSConfig;
 
   constructor() {
-    // Initialize AWS SQS Client with connection pooling
-    const requestTimeoutMs = parseInt(process.env.CLEVERTAP_SQS_REQUEST_TIMEOUT_MS || '20000', 10);
+    // Load and validate SQS configuration from environment
+    const maxMessages = parseInt(process.env.SQS_MAX_MESSAGES || '10', 10);
+    const waitTimeSeconds = parseInt(process.env.SQS_WAIT_TIME_SECONDS || '20', 10);
+    
+    // CRITICAL: Socket timeout MUST be > WaitTimeSeconds to prevent timeouts during long polling
+    // Default: WaitTimeSeconds + 10s buffer (20s + 10s = 30s)
+    const requestTimeoutMs = parseInt(
+      process.env.CLEVERTAP_SQS_REQUEST_TIMEOUT_MS || 
+      String((waitTimeSeconds + 10) * 1000),
+      10
+    );
     const connectionTimeoutMs = parseInt(process.env.CLEVERTAP_SQS_CONNECTION_TIMEOUT_MS || '5000', 10);
 
     this.client = new SQSClient({
@@ -30,17 +39,13 @@ export class CleverTapSQSClientFactory {
         accessKeyId: process.env.AWS_ACCESS_KEY_ID || '',
         secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || '',
       },
-      // Optimize for high throughput and allow more time for slow networks
-      maxAttempts: 3,
+      // Optimize for high throughput and allow more time for slow networks/long polling
+      maxAttempts: 5,  // Increased from 3 to 5 for better reliability
       requestHandler: new NodeHttpHandler({
         connectionTimeout: connectionTimeoutMs,
         socketTimeout: requestTimeoutMs,
       }),
     });
-
-    // Load and validate SQS configuration from environment
-    const maxMessages = parseInt(process.env.SQS_MAX_MESSAGES || '10', 10);
-    const waitTimeSeconds = parseInt(process.env.SQS_WAIT_TIME_SECONDS || '20', 10);
 
     // Validate configuration
     if (maxMessages < 1 || maxMessages > 10) {
