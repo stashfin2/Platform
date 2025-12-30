@@ -17,7 +17,7 @@ module.exports = {
     {
       name: 'api-server',
       script: './dist/index.js',
-      instances: 2, // Two instances for better throughput (API + S3 Path Consumer)
+      instances: 3, // Two instances for better throughput (API + S3 Path Consumer)
       exec_mode: 'cluster',
       
       // Auto-restart configuration
