@@ -8,6 +8,7 @@ import { CleverTapSync } from './workers/clevertap-sync';
 import { CleverTapSqsConsumer } from './workers/clevertap-sqs-consumer';
 import { CleverTapHybridSync } from './workers/clevertap-hybrid-sync';
 import { CleverTapS3PathConsumer } from './workers/clevertap-s3-path-consumer';
+import { CleverTapNonLendingSync } from './workers/clevertap-non-lending-sync';
 import { S3Service } from './services/s3.service';
 import { registerRoutes } from './routes';
 
@@ -20,6 +21,7 @@ const ENABLE_S3_SYNC = process.env.ENABLE_S3_SYNC === 'true';
 const ENABLE_CLEVERTAP_SYNC = process.env.ENABLE_CLEVERTAP_SYNC === 'true';
 const ENABLE_CLEVERTAP_SQS_CONSUMER = process.env.ENABLE_CLEVERTAP_SQS_CONSUMER !== 'false'; // Default: true
 const ENABLE_CLEVERTAP_HYBRID = process.env.ENABLE_CLEVERTAP_HYBRID === 'true';
+const ENABLE_CLEVERTAP_NON_LENDING_SYNC = process.env.ENABLE_CLEVERTAP_NON_LENDING_SYNC === 'true';
 
 // Create Fastify instance
 const fastify = Fastify({
@@ -33,6 +35,7 @@ let clevertapSync: CleverTapSync | null = null;
 let clevertapSqsConsumer: CleverTapSqsConsumer | null = null;
 let clevertapHybridSync: CleverTapHybridSync | null = null;
 let clevertapS3PathConsumer: CleverTapS3PathConsumer | null = null;
+let clevertapNonLendingSync: CleverTapNonLendingSync | null = null;
 let s3Service: S3Service | null = null;
 
 // Register CORS
@@ -75,6 +78,11 @@ const gracefulShutdown = async () => {
   // Stop CleverTap S3 path consumer
   if (clevertapS3PathConsumer) {
     clevertapS3PathConsumer.stop();
+  }
+  
+  // Stop CleverTap Non-Lending sync
+  if (clevertapNonLendingSync) {
+    clevertapNonLendingSync.stop();
   }
   
   await fastify.close();
@@ -127,6 +135,15 @@ const start = async () => {
       fastify.log.info('CleverTap SQS consumer started (legacy mode)');
     } else if (!ENABLE_CLEVERTAP_HYBRID) {
       fastify.log.info('CleverTap SQS consumer is disabled.');
+    }
+
+    // Start CleverTap Non-Lending Data sync if enabled
+    if (ENABLE_CLEVERTAP_NON_LENDING_SYNC) {
+      clevertapNonLendingSync = Container.get(CleverTapNonLendingSync);
+      await clevertapNonLendingSync.start();
+      fastify.log.info('CleverTap Non-Lending Data sync worker started');
+    } else {
+      fastify.log.info('CleverTap Non-Lending Data sync is disabled. Set ENABLE_CLEVERTAP_NON_LENDING_SYNC=true to enable.');
     }
   } catch (err) {
     fastify.log.error(err);

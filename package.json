@@ -8,7 +8,8 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "lint": "eslint . --ext .ts",
-    "format": "prettier --write \"src/**/*.ts\""
+    "format": "prettier --write \"src/**/*.ts\"",
+    "analyze:events": "npx ts-node analyze-clevertap-events.ts"
   },
   "keywords": [
     "fastify",
@@ -21,6 +22,7 @@
     "@aws-sdk/client-redshift-data": "^3.456.0",
     "@aws-sdk/client-s3": "^3.456.0",
     "@aws-sdk/client-sqs": "^3.456.0",
+    "@aws-sdk/credential-providers": "^3.965.0",
     "@fastify/cors": "^8.4.2",
     "dotenv": "^16.3.1",
     "fastify": "^4.24.3",

@@ -99,6 +99,14 @@ export class CleverTapHybridSync {
         try {
           this.logger.info(`   Processing file: ${csvFile}`);
           
+          // Verify file exists before attempting to read
+          const fileExists = await this.verifyCsvFileExists(csvFile);
+          if (!fileExists) {
+            this.logger.debug(`   └─ ⚠️  CSV file does not exist, skipping: ${csvFile}`);
+            processedFiles.push(csvFile); // Mark as processed so it doesn't retry
+            continue;
+          }
+          
           // Read CSV file into events (only this file in memory)
           const events = await this.readCsvFile(csvFile);
           this.logger.info(`   ├─ Read ${events.length} events from CSV`);
@@ -162,8 +170,17 @@ export class CleverTapHybridSync {
             global.gc();
           }
           
-        } catch (error) {
-          this.logger.error(`   └─ ❌ Error processing ${csvFile}`, error);
+        } catch (error: any) {
+          // Handle missing file errors at debug level to reduce log noise
+          if (error?.message?.includes('does not exist') || 
+              error?.name === 'NotFound' || 
+              error?.name === 'NoSuchKey' ||
+              error?.$metadata?.httpStatusCode === 404) {
+            this.logger.debug(`   └─ ⚠️  CSV file does not exist, skipping: ${csvFile}`);
+            processedFiles.push(csvFile); // Mark as processed so it doesn't retry
+          } else {
+            this.logger.error(`   └─ ❌ Error processing ${csvFile}`, error);
+          }
           // Continue with next file instead of failing entire sync
         }
       }
@@ -198,6 +215,30 @@ export class CleverTapHybridSync {
       this.logger.info('═══════════════════════════════════════════════════════════════');
     } catch (error) {
       this.logger.error('❌ Hybrid sync failed', error);
+    }
+  }
+
+  /**
+   * Verify that a CSV file exists in S3 before attempting to read it
+   * Prevents NoSuchKey errors when files are deleted or don't exist
+   */
+  private async verifyCsvFileExists(csvFile: string): Promise<boolean> {
+    const client = this.s3ClientFactory.getClient();
+    const config = this.s3ClientFactory.getConfig();
+
+    try {
+      await client.send(new HeadObjectCommand({
+        Bucket: config.bucket,
+        Key: csvFile,
+      }));
+      return true;
+    } catch (error: any) {
+      if (error.name === 'NotFound' || error.$metadata?.httpStatusCode === 404 || error.name === 'NoSuchKey') {
+        return false;
+      }
+      // For other errors, log but assume file doesn't exist to be safe
+      this.logger.debug(`Error checking CSV file existence: ${csvFile}`, error);
+      return false;
     }
   }
 
@@ -250,10 +291,19 @@ export class CleverTapHybridSync {
     // Test mode: limit number of rows to process
     const testRowLimit = parseInt(process.env.CLEVERTAP_TEST_ROW_LIMIT || '0', 10);
 
-    const response = await client.send(new GetObjectCommand({
-      Bucket: config.bucket,
-      Key: csvFile,
-    }));
+    let response;
+    try {
+      response = await client.send(new GetObjectCommand({
+        Bucket: config.bucket,
+        Key: csvFile,
+      }));
+    } catch (error: any) {
+      // Handle missing file errors gracefully
+      if (error.name === 'NotFound' || error.name === 'NoSuchKey' || error.$metadata?.httpStatusCode === 404) {
+        throw new Error(`CSV file does not exist: ${csvFile}`);
+      }
+      throw error;
+    }
 
     let stream: Readable = response.Body as Readable;
     if (csvFile.endsWith('.gz')) {
