@@ -21,7 +21,6 @@ export class CleverTapNonLendingSync {
   private fileAnalyzed: boolean = false;
   private totalFilesToProcess: number = 0;
   private filesProcessed: number = 0;
-  private allFilesProcessed: boolean = false;
   private readonly progressFilePath: string;
   private processedFileKeys: Set<string> = new Set();
 
@@ -82,8 +81,12 @@ export class CleverTapNonLendingSync {
    */
   async start(): Promise<void> {
     this.isRunning = true;
+    
+    const syncIntervalMs = parseInt(process.env.CLEVERTAP_NON_LENDING_SYNC_INTERVAL_MS || '3600000'); // Default 1 hour
+    
     this.logger.info('🚀 CleverTap Non-Lending Data sync worker started', {
-      mode: 'Process all files once and stop',
+      mode: 'Continuous sync',
+      intervalMinutes: syncIntervalMs / 60000,
     });
 
     // Create table if not exists (only once)
@@ -96,8 +99,16 @@ export class CleverTapNonLendingSync {
       }
     }
 
-    // Run sync once - it will process all files and stop
+    // Run first sync immediately
     await this.runSync();
+
+    // Set up interval to run sync periodically
+    this.syncInterval = setInterval(async () => {
+      if (this.isRunning) {
+        this.logger.info('⏰ Starting scheduled sync');
+        await this.runSync();
+      }
+    }, syncIntervalMs);
   }
 
   /**
@@ -117,7 +128,7 @@ export class CleverTapNonLendingSync {
    * Processes all files and stops when complete
    */
   private async runSync(): Promise<void> {
-    if (!this.isRunning || this.allFilesProcessed) {
+    if (!this.isRunning) {
       return;
     }
 
@@ -152,12 +163,10 @@ export class CleverTapNonLendingSync {
       const pendingFiles = allFiles.filter(file => !this.processedFileKeys.has(file));
       
       if (pendingFiles.length === 0 && allFiles.length > 0) {
-        this.logger.info('✅ All files already processed!', {
+        this.logger.info('✅ All files already processed - will check again on next interval', {
           totalFiles: allFiles.length,
           processedFiles: this.processedFileKeys.size,
         });
-        this.allFilesProcessed = true;
-        this.stop();
         return;
       }
 
@@ -171,15 +180,13 @@ export class CleverTapNonLendingSync {
 
       if (pendingFiles.length === 0) {
         if (this.filesProcessed > 0) {
-          this.logger.info('✅ All files processed!', {
+          this.logger.info('✅ All files synced - will check again on next interval', {
             totalFilesProcessed: this.filesProcessed,
             totalFilesExpected: this.totalFilesToProcess,
             match: this.filesProcessed === this.totalFilesToProcess ? '✅ MATCH' : '⚠️ MISMATCH',
           });
-          this.allFilesProcessed = true;
-          this.stop();
         } else {
-          this.logger.warn('⚠️  No files to sync - check S3 bucket and credentials', {
+          this.logger.info('ℹ️  No new files to sync - will check again on next interval', {
             bucket: this.s3ClientFactory.getConfig().bucket,
             region: this.s3ClientFactory.getConfig().region,
           });
@@ -327,13 +334,11 @@ export class CleverTapNonLendingSync {
 
       // Check if all files are processed
       if (this.filesProcessed >= this.totalFilesToProcess) {
-        this.logger.info('🎉 All files processed!', {
+        this.logger.info('🎉 All files in current batch processed - will check for new files on next interval', {
           totalFilesProcessed: this.filesProcessed,
           totalFilesExpected: this.totalFilesToProcess,
           match: this.filesProcessed === this.totalFilesToProcess ? '✅ MATCH' : '⚠️ MISMATCH',
         });
-        this.allFilesProcessed = true;
-        this.stop();
       } else {
         // Continue processing remaining files
         this.logger.info('🔄 Continuing to process remaining files...', {
